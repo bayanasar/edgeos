@@ -48,6 +48,13 @@ relative path. This uses a separate build directory:
 DTS_OVERLAY=board.dts bash sel4test.sh build /tmp/sel4-work imx8mp
 ```
 
+`boards/rsb3720.dts` is a candidate for an RSB-3720 with the factory i.MX8MP
+firmware: UART3, 6GiB physical RAM, and OP-TEE/RPMsg/DSP/OCRAM reservations.
+It uses the pinned upstream tree's node paths, which differ from the vendor
+tree. Compare the current board's memory reservations before using it. Linux
+`console=ttymxc2` and the factory DT's UART2 `stdout-path` disagree, so Linux
+console selection does not establish the U-Boot console wiring.
+
 This profile compiles an `imx8mp-evk` image; it does not flash or boot hardware.
 Board-specific memory reservations, console wiring and bootloader handoff must
 be verified separately. QEMU baseline success does not validate this profile,
