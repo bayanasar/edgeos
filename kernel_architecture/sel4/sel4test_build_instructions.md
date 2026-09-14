@@ -28,6 +28,11 @@ and disabled 51 according to configuration. Disabled tests are not passes.
 success marker; failure, premature exit and timeout return nonzero. It saves
 the full output under `logs/` and stops QEMU after the verdict.
 
+QEMU 10.0.11 also accepts `-machine virt,iommu-sys=on -device riscv-iommu-pci`;
+the image still boots with those options. This is only a boot-compatibility
+probe: the current seL4 RISC-V kernel has no IOMMU control path and no DMA test,
+so ADR-0004's isolation gate remains unverified.
+
 Overrides:
 
 - `BUILD_JOBS`: build/sync concurrency, default 4.
