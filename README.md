@@ -10,6 +10,8 @@ repo (ADR-0001).
 **This repository has no repository-wide licence.** The original demos below
 remain stubs. A working [seL4test build and QEMU runner](kernel_architecture/sel4/sel4test_build_instructions.md)
 is now available for development; it builds and tests pinned upstream code.
+The [IOMMU gate](kernel_architecture/sel4/iommu_gate/README.md) tests DMA and
+MSI confinement through QEMU's RISC-V IOMMU from a seL4 root task.
 
 ### Licensing (blocking)
 

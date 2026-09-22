@@ -29,9 +29,11 @@ success marker; failure, premature exit and timeout return nonzero. It saves
 the full output under `logs/` and stops QEMU after the verdict.
 
 QEMU 10.0.11 also accepts `-machine virt,iommu-sys=on -device riscv-iommu-pci`;
-the image still boots with those options. This is only a boot-compatibility
-probe: the current seL4 RISC-V kernel has no IOMMU control path and no DMA test,
-so ADR-0004's isolation gate remains unverified.
+the image still boots with those options. That is only a boot-compatibility
+probe: the seL4 RISC-V kernel has no IOMMU control path. DMA and MSI
+confinement through the emulated IOMMU is tested separately by the
+[IOMMU gate](iommu_gate/README.md), a user-space IOMMU owner built from the
+same pinned tree.
 
 Overrides:
 
@@ -63,8 +65,7 @@ console selection does not establish the U-Boot console wiring.
 This profile compiles an `imx8mp-evk` image; it does not flash or boot hardware.
 Board-specific memory reservations, console wiring and bootloader handoff must
 be verified separately. QEMU baseline success does not validate this profile,
-RVV state isolation, or DMA confinement. No RISC-V IOMMU controller or DMA
-isolation test is supplied here.
+RVV state isolation, or DMA confinement.
 
 References: [seL4test](https://docs.sel4.systems/projects/sel4test/),
 [official build containers](https://docs.sel4.systems/projects/dockerfiles/),

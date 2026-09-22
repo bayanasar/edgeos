@@ -1,0 +1,3 @@
+# Upstream pins shared by the seL4 scripts in this directory.
+manifest=ed9334e4f7f2b4eb2fe8fba0338e677ce35d8ec2
+image=trustworthysystems/sel4@sha256:ec5e639ed64c3033e86d90188aebf16a41933fd801f772a3da35ff77c6885c5d
