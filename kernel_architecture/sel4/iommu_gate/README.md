@@ -1,6 +1,6 @@
 # DMA isolation gate on QEMU RISC-V
 
-Status: 14/14 checks pass on QEMU 10.0.11; emulated IOMMU only, no hardware · Updated: 2026-09-21
+Status: 16/16 checks pass on QEMU 10.0.11; emulated IOMMU only, no hardware · Updated: 2026-09-21
 
 A seL4 root task that programs QEMU's RISC-V IOMMU (`riscv-iommu-pci`) and
 drives two QEMU `edu` devices as untrusted bus masters. It checks whether a
@@ -21,25 +21,28 @@ bash iommu_gate.sh test /tmp/sel4-work
 only the workspace. The test saves the complete serial log to
 `logs/build-iommu-gate-test.log`. It passes only when the log contains the
 success marker, a non-empty summary with every check passed, and no `FAIL:`
-line. Early exit, failure and timeout return nonzero. Overrides are the same
-as for `sel4test.sh`; `TEST_TIMEOUT` defaults to 120 seconds.
+line. Early exit, failure and timeout return nonzero. Overrides:
+`DOCKER_WORKSPACE` and `BUILD_JOBS` as for `sel4test.sh`, and `TEST_TIMEOUT`,
+default 120 seconds.
 
 QEMU configuration (`capture.py`): `virt` without AIA, `rv64`, 1 hart,
 3072MiB, `riscv-iommu-pci` at 00:01.0, and `edu,dma_mask=0xffffffffff` at
-00:02.0 (granted) and 00:03.0 (never granted). The wide DMA mask lets a
-device emit full physical addresses, as a hostile driver would.
+00:02.0 and 00:03.0. The wide DMA mask lets a device emit full physical
+addresses, as a hostile driver would.
 
 ## Checks
 
 Refusal is judged two ways: the target memory is unchanged, and the IOMMU
-fault queue holds records with the expected cause, requester ID and address.
-QEMU writes several records per refused transfer (16 per 64 bytes); every
-record must match. Permitted transfers must leave the fault queue empty.
+fault queue holds records with the expected cause and requester ID, and the
+expected address where the cause carries one (context and MSI-table faults
+report none). QEMU writes several records per refused transfer (16 per 64
+bytes); every record must match. Permitted transfers must leave the fault
+queue empty.
 
 | Check | Expected result |
 |---|---|
 | Write while the device directory is Off | refused, cause 256 |
-| Write by a device with no device context | refused, cause 258 |
+| Device with no context, aimed at the other device's granted IOVA and at its physical page | refused, cause 258; page unchanged |
 | Read through a read-write mapping | permitted, no fault |
 | Write back through the same mapping | data arrives, no fault |
 | Write to another page's physical address | refused, cause 15; page unchanged |
@@ -47,14 +50,17 @@ record must match. Permitted transfers must leave the fault queue empty.
 | Read of another page, then write-out to a mapped page | refused, cause 13; nothing copied |
 | Write through a read-only mapping | refused, cause 15; page unchanged |
 | Read through a read-only mapping | permitted |
+| Second device, given its own domain with its own page at the first device's grant IOVA | each device reaches its own page |
+| Second device writing to an IOVA mapped only for the first | refused, cause 15; page unchanged |
 | Write after unmap, `IOTINVAL.VMA` and `IOFENCE.C` | refused, cause 15 |
 | Read after the same revocation | refused, cause 13; nothing copied |
 | MSI to the interrupt file the device was granted | delivered |
 | MSI to an interrupt file with no MSI page-table entry | refused, cause 262 |
 | MSI addressed to the delivery target's physical address | refused, cause 15 |
 
-The first-row check runs before the directory exists; the rest run with a
-one-level directory in which only 00:02.0 has a context.
+The first check runs before the directory exists. 00:02.0 then gets a
+domain (read-write, read-only and scratch pages); 00:03.0 has no context
+until the two domain-separation checks, when it gets a domain of its own.
 
 The log also records one observation that is not a check: after the leaf is
 cleared **without** IOTLB invalidation, a device write still lands, because
@@ -65,10 +71,11 @@ the invalidation itself, not merely the page-table edit.
 
 - `riscv_iommu.c`: one-level device directory with extended device contexts,
   first-stage Sv39 translation, second stage Bare, one PSCID per domain.
-  Command and fault queues are polled. Every table change is followed by
-  `IODIR.INVAL_DDT` or `IOTINVAL.VMA` and an `IOFENCE.C` that writes a
-  completion word. Leaf PTEs preset A and D because hardware A/D update is
-  not enabled. MSI translation uses a flat MSI page table in basic mode.
+  Command and fault queues are polled. Every context change is followed by
+  `IODIR.INVAL_DDT`, every page-table change by `IOTINVAL.VMA`, and each by
+  an `IOFENCE.C` with PR and PW set that writes a completion word. Leaf PTEs
+  preset A and D because hardware A/D update is not enabled. MSI translation
+  uses a flat MSI page table in basic mode.
 - `pci.c`: ECAM access for bus 0 function 0, BAR0 placement in the 32-bit
   window, bus mastering, and 64-bit MSI capability programming.
 - `edu.c`: identification, DMA engine and interrupt trigger.
@@ -80,7 +87,10 @@ behind it can reach, so that code belongs to the trusted computing base.
 
 - This is QEMU's device model, not hardware. QEMU models no caches, so cache
   maintenance before a buffer is returned is untested, and IOTLB behaviour is
-  QEMU's.
+  QEMU's. QEMU executes commands synchronously, so it cannot show whether the
+  `IOFENCE.C` wait or its PR/PW ordering is needed; only the `IOTINVAL.VMA`
+  is shown to matter. Requests still in flight before the IOMMU would need
+  an interconnect-level flush, which is not done.
 - One protection domain: the root task owns the IOMMU and also drives the
   devices. A separate, untrusted driver component is not exercised.
 - Grants have no deadline or abort path.

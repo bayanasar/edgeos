@@ -39,11 +39,14 @@ def run(log_path: Path, timeout: int) -> int:
                 print(f"FAIL: {reason}; see {log_path}", file=sys.stderr)
             return 0 if passed else 1
         finally:
+            # The verdict is already decided; a slow QEMU exit must not change it.
             try:
                 if child.isalive():
                     child.sendcontrol("a")
                     child.send("x")
                     child.expect(pexpect.EOF, timeout=10)
+            except (pexpect.TIMEOUT, pexpect.EOF, OSError):
+                pass
             finally:
                 child.close(force=True)
 

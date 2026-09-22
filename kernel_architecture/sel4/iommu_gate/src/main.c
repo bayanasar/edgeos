@@ -1,9 +1,10 @@
 /*
  * Root task for the DMA isolation gate on qemu-riscv-virt.
  *
- * One edu device (slot 2) is given three pages through the IOMMU.
- * A second edu device (slot 3) is given nothing. Each check drives a
- * device transfer and judges it by the target memory and the fault queue.
+ * One edu device (slot 2) is given three pages through the IOMMU. A
+ * second edu device (slot 3) first has no context at all, then a domain
+ * of its own. Each check drives a device transfer and judges it by the
+ * target memory and the fault queue.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -48,7 +49,8 @@
 #define IOVA_SCRATCH 0x00102000ull  /* read-write, collects exfiltration attempts */
 #define IOVA_UNMAPPED 0x00103000ull
 #define IOVA_MSI     0x00200000ull  /* two pages onto MSI interrupt files 0 and 1 */
-#define PSCID        1
+#define PSCID_A      1
+#define PSCID_B      2
 #define XFER         64    /* bytes; keeps refused transfers well inside the fault queue */
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 40)
@@ -260,16 +262,19 @@ int main(void)
 
     ZF_LOGF_IF(riscv_iommu_enable_directory(&iommu), "enable directory");
 
-    /* 2. A device with no context is refused, even at a real address. */
-    to_bus(&dev_b, 0, grant.pa);
-    check(holds(grant.va, 0x11) && refused(IOMMU_CAUSE_DDT_INVALID, devid_b, 0, 0),
-          "device without context refused");
-
     iommu_domain_t dom;
-    ZF_LOGF_IF(iommu_domain_attach(&iommu, &dom, devid_a, PSCID), "attach");
+    ZF_LOGF_IF(iommu_domain_attach(&iommu, &dom, devid_a, PSCID_A), "attach");
     ZF_LOGF_IF(iommu_map(&dom, IOVA_GRANT, grant.pa, true), "map grant");
     ZF_LOGF_IF(iommu_map(&dom, IOVA_RO, ro.pa, false), "map ro");
     ZF_LOGF_IF(iommu_map(&dom, IOVA_SCRATCH, scratch.pa, true), "map scratch");
+
+    /* 2. With the other device's grant live, a device with no context is
+     * refused both at that grant's IOVA and at its physical address. */
+    to_bus(&dev_b, 0, IOVA_GRANT);
+    bool denied = refused(IOMMU_CAUSE_DDT_INVALID, devid_b, 0, 0);
+    to_bus(&dev_b, 0, grant.pa);
+    check(denied && refused(IOMMU_CAUSE_DDT_INVALID, devid_b, 0, 0) && holds(grant.va, 0x11),
+          "device without context refused while another is granted");
 
     /* 3-4. Permitted read then write through the grant. */
     fill(grant.va, 0x22);
@@ -292,7 +297,7 @@ int main(void)
 
     /* 7. Read of the secret, then an attempt to write it somewhere visible. */
     from_bus(&dev_a, secret.pa, 1024);
-    bool denied = refused(IOMMU_CAUSE_RD_FAULT_S, devid_a, secret.pa, secret.pa + XFER);
+    denied = refused(IOMMU_CAUSE_RD_FAULT_S, devid_a, secret.pa, secret.pa + XFER);
     to_bus(&dev_a, 1024, IOVA_SCRATCH);
     check(denied && !holds(scratch.va, 0x5e) && no_fault(),
           "read outside grant refused, nothing exfiltrated");
@@ -307,7 +312,26 @@ int main(void)
     to_bus(&dev_a, 2048, IOVA_SCRATCH);
     check(holds(scratch.va, 0x33) && no_fault(), "read from read-only mapping permitted");
 
-    /* 10. Informational: clear the leaf without invalidating. The IOTLB is
+    /* 10-11. The second device gets its own domain, with its own page at
+     * the IOVA the first device uses for its grant. The same IOVA must
+     * reach different pages, and the first device's other IOVAs must not
+     * exist for the second. */
+    page_t own_b = alloc_page();
+    iommu_domain_t dom_b;
+    ZF_LOGF_IF(iommu_domain_attach(&iommu, &dom_b, devid_b, PSCID_B), "attach b");
+    ZF_LOGF_IF(iommu_map(&dom_b, IOVA_GRANT, own_b.pa, true), "map b");
+    fill(own_b.va, 0x66);
+    from_bus(&dev_b, IOVA_GRANT, 0);
+    memset(own_b.va, 0, XFER);
+    to_bus(&dev_b, 0, IOVA_GRANT);
+    check(holds(own_b.va, 0x66) && holds(grant.va, 0x22) && no_fault(),
+          "same IOVA reaches each device's own page");
+    to_bus(&dev_b, 0, IOVA_SCRATCH);
+    check(holds(scratch.va, 0x33) &&
+          refused(IOMMU_CAUSE_WR_FAULT_S, devid_b, IOVA_SCRATCH, IOVA_SCRATCH + XFER),
+          "second device cannot reach the first device's mappings");
+
+    /* Informational: clear the leaf without invalidating. The IOTLB is
      * warm from check 4; whether the stale entry is still used is the
      * model's choice, and shows why revocation must include the flush. */
     memset(grant.va, 0, XFER);
@@ -318,7 +342,7 @@ int main(void)
     printf("INFO: write after unmap without IOTLB flush %s\n",
            stale ? "landed (stale IOTLB entry)" : "was refused");
 
-    /* 11-12. Revocation: after unmap + flush + fence the grant is gone. */
+    /* 12-13. Revocation: after unmap + flush + fence the grant is gone. */
     ZF_LOGF_IF(iommu_flush(&dom, IOVA_GRANT), "flush");
     memset(grant.va, 0, XFER);
     to_bus(&dev_a, 0, IOVA_GRANT);
@@ -336,7 +360,7 @@ int main(void)
     check(denied && !holds(scratch.va, 0x44) && no_fault(),
           "read after revocation refused, nothing exfiltrated");
 
-    /* 13-15. MSI remapping. Only interrupt file 0 has an MSI page-table
+    /* 14-16. MSI remapping. Only interrupt file 0 has an MSI page-table
      * entry; it delivers to a RAM page standing in for the owner's
      * interrupt file, so a delivered message is visible as data. */
     page_t msi_pt = alloc_page();

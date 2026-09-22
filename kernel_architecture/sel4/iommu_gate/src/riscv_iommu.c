@@ -48,11 +48,15 @@
 #define MSI_PTE_BASIC   (3ull << 1)
 
 #define CMD_IOTINVAL_VMA  1
+#define CMD_IOTINVAL_GVMA (1 | (1 << 7))
 #define CMD_IOFENCE_C     2
 #define CMD_IODIR_DDT     3
 #define CMD_IOTINVAL_AV   (1ull << 10)
 #define CMD_IOTINVAL_PSCV (1ull << 32)
+#define CMD_IOTINVAL_GV   (1ull << 33)
 #define CMD_IOFENCE_AV    (1ull << 10)
+#define CMD_IOFENCE_PR    (1ull << 12)
+#define CMD_IOFENCE_PW    (1ull << 13)
 #define CMD_IODIR_DV      (1ull << 33)
 
 #define PTE_V (1ull << 0)
@@ -130,13 +134,19 @@ static int cq_submit(riscv_iommu_t *m, uint64_t d0, uint64_t d1)
 }
 
 /* IOFENCE.C with a completion write: every earlier command has taken
- * effect once the IOMMU has stored the sequence number. */
+ * effect once the IOMMU has stored the sequence number. PR and PW also
+ * commit device reads and writes the IOMMU has already processed, which
+ * reclaiming memory from a device requires (spec 1.0, IOFENCE.C note).
+ * Requests still in flight before the IOMMU need an interconnect-level
+ * flush by whoever drives the device. */
 static int cq_sync(riscv_iommu_t *m)
 {
     uint32_t seq = ++m->fence_seq;
     *m->fence_word = 0;
     fence();
-    if (cq_submit(m, CMD_IOFENCE_C | CMD_IOFENCE_AV | ((uint64_t)seq << 32), m->fence_pa >> 2)) {
+    uint64_t d0 = CMD_IOFENCE_C | CMD_IOFENCE_AV | CMD_IOFENCE_PR | CMD_IOFENCE_PW |
+                  ((uint64_t)seq << 32);
+    if (cq_submit(m, d0, m->fence_pa >> 2)) {
         return -1;
     }
     for (int i = 0; i < POLL_LIMIT; i++) {
@@ -160,13 +170,16 @@ int riscv_iommu_init(riscv_iommu_t *m, void *regs, ps_dma_man_t *dma)
         printf("iommu: unsupported cap %#llx\n", (unsigned long long)m->cap);
         return -1;
     }
-    if ((rd64(m, REG_DDTP) & DDTP_MODE_MASK) != DDTP_MODE_OFF) {
+    uint64_t ddtp = 0;
+    for (int i = 0; i < POLL_LIMIT && ((ddtp = rd64(m, REG_DDTP)) & DDTP_BUSY); i++) {
+    }
+    if ((ddtp & (DDTP_BUSY | DDTP_MODE_MASK)) != DDTP_MODE_OFF) {
         printf("iommu: directory not Off at reset\n");
         return -1;
     }
 
-    uintptr_t ddt_pa, cq_pa, fq_pa, fence_pa;
-    m->ddt = alloc_page(m, &ddt_pa);
+    uintptr_t cq_pa, fq_pa, fence_pa;
+    m->ddt = alloc_page(m, &m->ddt_pa);
     m->cq = alloc_page(m, &cq_pa);
     m->fq = alloc_page(m, &fq_pa);
     m->fence_word = alloc_page(m, &fence_pa);
@@ -192,17 +205,14 @@ int riscv_iommu_init(riscv_iommu_t *m, void *regs, ps_dma_man_t *dma)
     if (wait_bits32(m, REG_CQCSR, QUEUE_ON | QUEUE_BUSY, QUEUE_ON)) {
         return -1;
     }
-
-    /* Record the directory while still Off; the mode switch keeps it. */
-    wr64(m, REG_DDTP, PPN_FIELD(ddt_pa) | DDTP_MODE_OFF);
     return 0;
 }
 
 int riscv_iommu_enable_directory(riscv_iommu_t *m)
 {
-    uint64_t ddtp = rd64(m, REG_DDTP) & ~DDTP_MODE_MASK;
     fence();
-    wr64(m, REG_DDTP, ddtp | DDTP_MODE_1LVL);
+    /* Root and mode in one store; busy is clear since init. */
+    wr64(m, REG_DDTP, PPN_FIELD(m->ddt_pa) | DDTP_MODE_1LVL);
     for (int i = 0; i < POLL_LIMIT; i++) {
         uint64_t v = rd64(m, REG_DDTP);
         if (!(v & DDTP_BUSY)) {
@@ -270,8 +280,11 @@ int iommu_domain_set_msi(iommu_domain_t *d, uintptr_t msi_pt_pa, uintptr_t windo
     fence();
     dc[4] = DC_MSIPTP_FLAT | ATP_PPN(msi_pt_pa);
     fence();
-    /* The context may be cached; it must be reloaded before it counts. */
-    if (cq_submit(m, CMD_IODIR_DDT | CMD_IODIR_DV | ((uint64_t)d->devid << 40), 0)) {
+    /* The context may be cached; it must be reloaded before it counts.
+     * MSI page-table entries are cached under the context's GSCID (0,
+     * second stage Bare) and are flushed as a whole. */
+    if (cq_submit(m, CMD_IODIR_DDT | CMD_IODIR_DV | ((uint64_t)d->devid << 40), 0) ||
+        cq_submit(m, CMD_IOTINVAL_GVMA | CMD_IOTINVAL_GV, 0)) {
         return -1;
     }
     return cq_sync(m);
@@ -280,6 +293,20 @@ int iommu_domain_set_msi(iommu_domain_t *d, uintptr_t msi_pt_pa, uintptr_t windo
 uint64_t riscv_iommu_msi_pte(uintptr_t file_pa)
 {
     return PPN_FIELD(file_pa) | MSI_PTE_BASIC | MSI_PTE_V;
+}
+
+static int iotlb_invalidate(iommu_domain_t *d, uint64_t iova, bool whole_space)
+{
+    uint64_t d0 = CMD_IOTINVAL_VMA | CMD_IOTINVAL_PSCV | ((uint64_t)d->pscid << 12);
+    uint64_t d1 = 0;
+    if (!whole_space) {
+        d0 |= CMD_IOTINVAL_AV;
+        d1 = (iova & ~(uint64_t)(PAGE - 1)) >> 2;
+    }
+    if (cq_submit(d->iommu, d0, d1)) {
+        return -1;
+    }
+    return cq_sync(d->iommu);
 }
 
 static uint64_t *table_for(iommu_domain_t *d, uintptr_t pa)
@@ -325,6 +352,7 @@ int iommu_map(iommu_domain_t *d, uint64_t iova, uintptr_t pa, bool writable)
     if ((iova | pa) & (PAGE - 1) || iova >= (1ull << 38)) {
         return -1;
     }
+    int ntables = d->ntables;
     uint64_t *leaf = leaf_slot(d, iova, true);
     if (leaf == NULL || (*leaf & PTE_V)) {
         return -1;
@@ -337,7 +365,10 @@ int iommu_map(iommu_domain_t *d, uint64_t iova, uintptr_t pa, bool writable)
     fence();
     *leaf = pte;
     fence();
-    return 0;
+    /* Every first-stage change is followed by IOTINVAL.VMA. With ADDR it
+     * covers leaf entries only, so new directory levels flush the whole
+     * address space. */
+    return iotlb_invalidate(d, iova, d->ntables != ntables);
 }
 
 int iommu_unmap(iommu_domain_t *d, uint64_t iova, bool invalidate)
@@ -353,12 +384,7 @@ int iommu_unmap(iommu_domain_t *d, uint64_t iova, bool invalidate)
 
 int iommu_flush(iommu_domain_t *d, uint64_t iova)
 {
-    uint64_t d0 = CMD_IOTINVAL_VMA | CMD_IOTINVAL_AV | CMD_IOTINVAL_PSCV |
-                  ((uint64_t)d->pscid << 12);
-    if (cq_submit(d->iommu, d0, (iova & ~(uint64_t)(PAGE - 1)) >> 2)) {
-        return -1;
-    }
-    return cq_sync(d->iommu);
+    return iotlb_invalidate(d, iova, false);
 }
 
 int riscv_iommu_pop_fault(riscv_iommu_t *m, iommu_fault_t *f)

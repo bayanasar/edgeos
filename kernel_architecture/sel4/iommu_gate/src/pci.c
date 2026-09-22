@@ -91,7 +91,7 @@ int pci_assign_bar0(pci_bus_t *bus, pci_dev_t *dev)
         mask |= 0xffffffff00000000ull;
     }
     uint64_t size = ~mask + 1;
-    if (mask == 0xffffffff00000000ull || (size & (size - 1)) != 0) {
+    if (mask == 0xffffffff00000000ull || size == 0 || (size & (size - 1)) != 0) {
         return -1;
     }
 

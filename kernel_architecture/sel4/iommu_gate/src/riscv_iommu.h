@@ -19,6 +19,7 @@ typedef struct {
     uint64_t cap;
 
     uint64_t *ddt;                 /* one-level device directory */
+    uintptr_t ddt_pa;
     uint64_t *cq;                  /* command queue */
     uint32_t cq_tail;
     uint32_t cq_mask;
