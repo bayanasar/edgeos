@@ -7,23 +7,31 @@ repo (ADR-0001).
 
 ## Status — read this before using anything here
 
-**This repository has no repository-wide licence.** The original demos below
-remain stubs. A working [seL4test build and QEMU runner](kernel_architecture/sel4/sel4test_build_instructions.md)
-is now available for development; it builds and tests pinned upstream code.
+Licensed under BSD-3-Clause ([LICENSE](LICENSE)), with the exceptions below.
+The original demos remain stubs. A working [seL4test build and QEMU runner](kernel_architecture/sel4/sel4test_build_instructions.md)
+is available for development; it builds and tests pinned upstream code.
 The [IOMMU gate](kernel_architecture/sel4/iommu_gate/README.md) tests DMA and
 MSI confinement through QEMU's RISC-V IOMMU from a seL4 root task.
 
-### Licensing (blocking)
+### Licensing
 
-There is **no LICENSE file**. Under default copyright that means *all rights
-reserved* — nobody may use, copy or redistribute this, whatever the word "open"
-in the name suggests. The repository also has more than one contributor, so a
-licence cannot simply be declared after the fact: it needs the other
-contributor's agreement, or a DCO going forward.
+The BSD-3-Clause licence covers the contributions of its copyright holder. Files
+that a second contributor created, listed below, are **not** covered until that
+contributor agrees; until then they remain all rights reserved.
 
-**Licence choice is the owner's decision and has not been made.** Public
-distribution remains blocked on licensing; development tooling is maintained
-here while that decision is pending.
+- `kernel_architecture/README.md`
+- `kernel_architecture/fuchsia/fidl_hello/`
+- `kernel_architecture/linux/`
+- `kernel_architecture/sel4/ipc_demo/`
+- `kernel_architecture/sel4/sel4test_build_instructions.md` (since rewritten;
+  its first version is theirs)
+
+Files derived from upstream projects keep their upstream licence and say so in
+an SPDX header. `kernel_architecture/sel4/iommu_gate/CMakeLists.txt` and
+`settings.cmake` are BSD-2-Clause, from seL4test.
+
+No publication path is configured. A public copy is made only after the
+contributor above agrees and the full history passes a privacy review.
 
 ### What the demos actually are
 
@@ -49,4 +57,4 @@ kernel_architecture/
 
 ## Contributing
 
-Not yet — see Licensing above.
+Not yet: the second contributor's agreement is still open (see Licensing).

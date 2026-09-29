@@ -1,3 +1,12 @@
+#
+# Copyright 2019, Data61, CSIRO (ABN 41 687 119 230)
+#
+# SPDX-License-Identifier: BSD-2-Clause
+#
+# Derived from seL4test projects/sel4test/CMakeLists.txt at
+# 60b7b47ee0a67f56e15951735a6aa9d270d47f55.
+#
+
 cmake_minimum_required(VERSION 3.16.0)
 
 include(settings.cmake)
