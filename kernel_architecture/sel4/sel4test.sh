@@ -45,6 +45,10 @@ if [[ $action == prepare ]]; then
     "${REPO_TOOL:-repo}" init -u https://github.com/seL4/sel4test-manifest.git \
         -b "$manifest" --depth=1 --no-clone-bundle
     "${REPO_TOOL:-repo}" sync -c -j"${BUILD_JOBS:-4}" --no-clone-bundle
+    actual=$(git -C .repo/manifests rev-parse HEAD)
+    [[ $actual == "$manifest" ]] || {
+        echo "Manifest mismatch after sync: expected $manifest, got $actual" >&2; exit 1;
+    }
     "${REPO_TOOL:-repo}" manifest -r -o "$workspace/manifest.lock.xml"
     exit 0
 fi
@@ -68,6 +72,9 @@ if [[ $action == build ]]; then
 else
     [[ $profile == qemu-riscv64 ]] || {
         echo "The imx8mp profile is build-only; hardware boot needs a board console" >&2; exit 2;
+    }
+    [[ -d $workspace/sel4test/$build ]] || {
+        echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
     }
     "${container[@]}" -i "$image" python3 - \
         "/work/logs/$build-test.log" "${TEST_TIMEOUT:-180}" \

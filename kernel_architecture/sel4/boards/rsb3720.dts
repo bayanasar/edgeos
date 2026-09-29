@@ -2,6 +2,11 @@
  * RSB-3720 i.MX8MP candidate for the pinned upstream imx8mp-evk tree.
  * Match the factory firmware's memory reservations and Linux UART3 console.
  * Build validated only; bootloader console and hardware boot remain untested.
+ *
+ * The reserved-memory children rely on the base node's #address-cells = <2>,
+ * #size-cells = <2> and ranges, which the pinned imx8mp-evk.dts defines. The
+ * factory firmware also reserves on-chip RAM at 0x900000; it lies below DRAM,
+ * so it is not listed here.
  */
 / {
     chosen {
@@ -32,10 +37,6 @@
         };
         dsp@92400000 {
             reg = <0x0 0x92400000 0x0 0x02000000>;
-            no-map;
-        };
-        ocram@900000 {
-            reg = <0x0 0x00900000 0x0 0x00070000>;
             no-map;
         };
     };

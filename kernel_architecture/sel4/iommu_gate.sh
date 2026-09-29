@@ -38,6 +38,9 @@ if [[ $action == build ]]; then
          ninja -j"$BUILD_JOBS"' \
         2>&1 | tee "$workspace/logs/$build.log"
 else
+    [[ -d $workspace/sel4test/$build ]] || {
+        echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
+    }
     "${container[@]}" -i "$image" python3 - \
         "/work/logs/$build-test.log" "${TEST_TIMEOUT:-120}" \
         < "$script_dir/iommu_gate/capture.py"

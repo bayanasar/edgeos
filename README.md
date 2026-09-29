@@ -50,9 +50,10 @@ The seL4test runner is separate from `sel4/ipc_demo` and does not repair it.
 
 ```
 kernel_architecture/
-  fuchsia/     FIDL and component demos
-  sel4/        seL4 / CAmkES demos
-  linux/       module, syscall and inspection demos
+  fuchsia/     FIDL and component demos (stubs)
+  sel4/        seL4test build and QEMU runner, IOMMU gate, RSB-3720 overlay;
+               ipc_demo (stub)
+  linux/       module, syscall and inspection demos (stubs)
 ```
 
 ## Contributing

@@ -126,8 +126,22 @@ static int cq_submit(riscv_iommu_t *m, uint64_t d0, uint64_t d1)
     fence();
     m->cq_tail = next;
     wr32(m, REG_CQT, next);
-    if (rd32(m, REG_CQCSR) & (QUEUE_MF | CQCSR_CMD_ILL | CQCSR_CMD_TO)) {
-        printf("iommu: command queue error, cqcsr=%#x\n", rd32(m, REG_CQCSR));
+    uint32_t csr = rd32(m, REG_CQCSR);
+    uint32_t err = csr & (QUEUE_MF | CQCSR_CMD_ILL | CQCSR_CMD_TO);
+    if (err) {
+        printf("iommu: command queue error, cqcsr=%#x\n", csr);
+        if (err & CQCSR_CMD_ILL) {
+            /* The IOMMU stops at an illegal command without advancing the
+             * head, so clearing CMD_ILL alone would execute it again. Replace
+             * it with an IOFENCE.C that has no completion action. */
+            uint32_t head = rd32(m, REG_CQH) & m->cq_mask;
+            m->cq[2 * head] = CMD_IOFENCE_C;
+            m->cq[2 * head + 1] = 0;
+            fence();
+        }
+        /* The error bits are write-1-to-clear; left set, they stop the queue
+         * and every later submission reports them again. */
+        wr32(m, REG_CQCSR, QUEUE_EN | err);
         return -1;
     }
     return 0;
