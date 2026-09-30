@@ -8,6 +8,11 @@
 //! resolution in configuration byte 4: 93.75, 187.5, 375 or 750 ms for 9 to
 //! 12 bits. The driver waits the full time rather than polling, because a
 //! transaction always begins with a reset, which would interrupt a conversion.
+//!
+//! The device must be externally powered: a parasite-powered DS18B20 needs a
+//! strong pull-up during conversion, which the bus primitives do not offer.
+//! A reading of exactly +85 degC (0x0550) is also the power-on value of the
+//! temperature register; it is reported as read, not second-guessed.
 
 #![cfg_attr(not(test), no_std)]
 #![forbid(unsafe_code)]
@@ -23,6 +28,9 @@ const SKIP_ROM: u8 = 0xCC;
 const CONVERT_T: u8 = 0x44;
 const READ_SCRATCHPAD: u8 = 0xBE;
 const SCRATCHPAD_LEN: usize = 9;
+/// Configuration register: bit 7 reads 0, bits 4..0 read 1.
+const CONFIG_FIXED_MASK: u8 = 0x9F;
+const CONFIG_FIXED_VALUE: u8 = 0x1F;
 const TRANSFER: Duration = Duration::from_millis(100);
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -32,6 +40,10 @@ pub enum Error {
     Crc,
     /// The scratchpad read back as all ones: nothing drove the bus.
     NoData,
+    /// The configuration byte's fixed bits are wrong (bit 7 must be 0, bits 4
+    /// to 0 must be 1). An all-zero scratchpad, from a data line shorted to
+    /// ground, passes the CRC and is caught here.
+    BadConfig(u8),
     /// The clock cannot represent the deadline.
     Clock,
 }
@@ -147,6 +159,9 @@ impl<W: OneWire> Ds18b20<W> {
         }
         if crc8(&sp[..8]) != sp[8] {
             return Err(Error::Crc);
+        }
+        if sp[4] & CONFIG_FIXED_MASK != CONFIG_FIXED_VALUE {
+            return Err(Error::BadConfig(sp[4]));
         }
         self.resolution = Resolution::from_config(sp[4]);
         let raw = i16::from_le_bytes([sp[0], sp[1]]) & !self.resolution.undefined_bits();
@@ -267,6 +282,36 @@ mod tests {
         sp[0] ^= 1;
         let mut t = Ds18b20::new(device(sp), 23, 1);
         assert_eq!(t.read(&FakeClock::new()), Err(Error::Crc));
+    }
+
+    #[test]
+    fn a_shorted_bus_is_not_zero_degrees() {
+        // All zeros passes the CRC; the configuration byte gives it away.
+        let clock = FakeClock::new();
+        let mut t = Ds18b20::new(device([0; 9]), 23, 1);
+        assert_eq!(t.read(&clock), Err(Error::BadConfig(0)));
+        // The resolution is not taken from a rejected scratchpad.
+        assert_eq!(t.resolution(), Resolution::Bits12);
+    }
+
+    #[test]
+    fn each_resolution_sets_its_wait_and_mask() {
+        // Datasheet: 9 to 12 bits leave 3, 2, 1, 0 low bits undefined and take
+        // at most 93.75, 187.5, 375 and 750 ms.
+        for (config, masked, wait_us) in [
+            (0x1f, 0x0190, 93_750),
+            (0x3f, 0x0194, 187_500),
+            (0x5f, 0x0196, 375_000),
+            (0x7f, 0x0197, 750_000),
+        ] {
+            let clock = FakeClock::new();
+            let mut t = Ds18b20::new(device(scratchpad(0x0197, config)), 23, 1);
+            assert_eq!(t.read(&clock).unwrap().channels().unwrap()[0].raw, masked);
+            let before = clock.now();
+            t.read(&clock).unwrap();
+            let waited = clock.now().saturating_duration_since(before);
+            assert_eq!(waited, Duration::from_micros(wait_us), "config {config:#x}");
+        }
     }
 
     #[test]

@@ -66,8 +66,9 @@ struct I2cRdwrData {
 /// One I2C adapter. A write followed by a read is issued as one `I2C_RDWR`
 /// call, so the kernel joins them with a repeated start.
 ///
-/// The deadline is checked before the transfer; the transfer itself is bounded
-/// by the adapter's own kernel timeout.
+/// The deadline is checked before the transfer. The transfer itself is bounded
+/// by the adapter's kernel timeout (about a second on common adapters), not by
+/// the deadline: i2c-dev offers no per-transfer timeout.
 pub struct LinuxI2c {
     dev: File,
     clock: MonotonicClock,
@@ -104,25 +105,7 @@ impl I2c for LinuxI2c {
         if self.clock.now() >= deadline {
             return Err(BusError::Timeout);
         }
-        let mut msgs: [I2cMsg; 2] = [
-            I2cMsg {
-                addr: addr.into(),
-                flags: 0,
-                len: write.len() as u16,
-                buf: write.as_ptr() as *mut u8,
-            },
-            I2cMsg {
-                addr: addr.into(),
-                flags: I2C_M_RD,
-                len: read.len() as u16,
-                buf: read.as_mut_ptr(),
-            },
-        ];
-        let (first, count) = match (write.is_empty(), read.is_empty()) {
-            (false, false) => (0, 2),
-            (false, true) => (0, 1),
-            (true, _) => (1, 1),
-        };
+        let (mut msgs, first, count) = messages(addr, write, read);
         let mut data = I2cRdwrData {
             msgs: msgs[first..].as_mut_ptr(),
             nmsgs: count,
@@ -134,12 +117,43 @@ impl I2c for LinuxI2c {
         if rc >= 0 {
             return Ok(());
         }
-        Err(match io::Error::last_os_error().raw_os_error() {
-            Some(libc::ENXIO) | Some(libc::EREMOTEIO) => BusError::Nak,
-            Some(libc::ETIMEDOUT) => BusError::Timeout,
-            Some(libc::EINVAL) => BusError::Invalid,
-            _ => BusError::Io,
-        })
+        Err(errno_to_bus(io::Error::last_os_error().raw_os_error()))
+    }
+}
+
+/// The two i2c-dev messages for a write-then-read, and which of them to send:
+/// write only, read only, or both joined by a repeated start.
+fn messages(addr: u8, write: &[u8], read: &mut [u8]) -> ([I2cMsg; 2], usize, u32) {
+    let msgs = [
+        I2cMsg {
+            addr: addr.into(),
+            flags: 0,
+            len: write.len() as u16,
+            buf: write.as_ptr() as *mut u8,
+        },
+        I2cMsg {
+            addr: addr.into(),
+            flags: I2C_M_RD,
+            len: read.len() as u16,
+            buf: read.as_mut_ptr(),
+        },
+    ];
+    let (first, count) = match (write.is_empty(), read.is_empty()) {
+        (false, false) => (0, 2),
+        (false, true) => (0, 1),
+        (true, _) => (1, 1),
+    };
+    (msgs, first, count)
+}
+
+/// i2c-dev errors: the Linux I2C fault codes (Documentation/i2c/fault-codes.rst)
+/// name a missing acknowledgement ENXIO or EREMOTEIO.
+fn errno_to_bus(errno: Option<i32>) -> BusError {
+    match errno {
+        Some(libc::ENXIO) | Some(libc::EREMOTEIO) => BusError::Nak,
+        Some(libc::ETIMEDOUT) => BusError::Timeout,
+        Some(libc::EINVAL) => BusError::Invalid,
+        _ => BusError::Io,
     }
 }
 
@@ -213,6 +227,55 @@ mod tests {
         );
         assert!(ReadArgs::parse(0x48, ["--addr".to_string()].into_iter()).is_err());
         assert!(ReadArgs::parse(0x48, ["--nope", "1"].map(String::from).into_iter()).is_err());
+    }
+
+    #[test]
+    fn write_then_read_is_two_messages_joined_by_a_repeated_start() {
+        let w = [0xF7];
+        let mut r = [0u8; 6];
+        let (m, first, count) = messages(0x76, &w, &mut r);
+        assert_eq!((first, count), (0, 2));
+        assert_eq!((m[0].addr, m[0].flags, m[0].len), (0x76, 0, 1));
+        assert_eq!((m[1].addr, m[1].flags, m[1].len), (0x76, I2C_M_RD, 6));
+        assert_eq!(I2C_M_RD, 0x0001); // linux/i2c.h
+        let (_, first, count) = messages(0x76, &w, &mut []);
+        assert_eq!((first, count), (0, 1));
+        let (_, first, count) = messages(0x76, &[], &mut r);
+        assert_eq!((first, count), (1, 1));
+    }
+
+    #[test]
+    fn errno_maps_to_bus_errors() {
+        assert_eq!(errno_to_bus(Some(libc::ENXIO)), BusError::Nak);
+        assert_eq!(errno_to_bus(Some(libc::EREMOTEIO)), BusError::Nak);
+        assert_eq!(errno_to_bus(Some(libc::ETIMEDOUT)), BusError::Timeout);
+        assert_eq!(errno_to_bus(Some(libc::EINVAL)), BusError::Invalid);
+        assert_eq!(errno_to_bus(Some(libc::EIO)), BusError::Io);
+        assert_eq!(errno_to_bus(None), BusError::Io);
+    }
+
+    #[test]
+    fn a_passed_deadline_stops_before_the_bus() {
+        // /dev/null accepts the open but not the ioctl, so reaching the bus
+        // would report Io rather than Timeout.
+        let mut i2c = LinuxI2c {
+            dev: File::open("/dev/null").unwrap(),
+            clock: MonotonicClock,
+        };
+        let past = MonotonicClock.now();
+        assert_eq!(
+            i2c.transfer(0x76, &[0xD0], &mut [0], past),
+            Err(BusError::Timeout)
+        );
+        let future = past.checked_add(Duration::from_secs(5)).unwrap();
+        assert_eq!(
+            i2c.transfer(0x76, &[0xD0], &mut [0], future),
+            Err(BusError::Io)
+        );
+        assert_eq!(
+            i2c.transfer(0x80, &[0xD0], &mut [0], future),
+            Err(BusError::Invalid)
+        );
     }
 
     #[test]

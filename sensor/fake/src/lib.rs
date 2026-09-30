@@ -14,6 +14,10 @@ use std::time::Duration;
 
 use sensor_core::bus::{BusError, Clock, I2c, Instant};
 
+/// A fake bus panics after this many transfers, so a driver that ignores its
+/// deadline fails its test instead of filling memory.
+pub const RUNAWAY: usize = 100_000;
+
 /// Time moves only when a driver sleeps.
 #[derive(Debug, Default)]
 pub struct FakeClock {
@@ -161,6 +165,10 @@ impl I2c for FakeI2c {
         if let Some(e) = self.fail_next.take() {
             return Err(e);
         }
+        assert!(
+            self.log.len() < RUNAWAY,
+            "runaway: {RUNAWAY} transfers without stopping"
+        );
         let dev = self
             .devices
             .iter_mut()
@@ -205,6 +213,10 @@ impl sensor_core::bus::OneWire for FakeOneWire {
         read: &mut [u8],
         _deadline: Instant,
     ) -> Result<(), BusError> {
+        assert!(
+            self.log.len() < RUNAWAY,
+            "runaway: {RUNAWAY} transactions without stopping"
+        );
         let dev = self.device.as_mut().ok_or(BusError::NoPresence)?;
         dev(write, read)?;
         self.log.push((write.to_vec(), read.len()));

@@ -23,7 +23,9 @@ point, no `unsafe`.
   `I2c`, `OneWire` and `Spi`. A transport implements the ones it provides; a
   driver that needs a primitive the transport lacks does not compile against
   it. Every blocking operation takes an absolute deadline on the monotonic
-  clock, and a driver never retries on its own.
+  clock, and a driver never retries on its own. On Linux, I2C checks the
+  deadline before each transfer and is otherwise bounded by the kernel
+  adapter's own timeout; 1-Wire waits no longer than the deadline.
 - **Records** (`sample`): `Sample` (128 bytes, up to 8 channels) and `Event`
   (32 bytes). Fixed layout, no pointers, no padding, integer values scaled by
   a decimal exponent. Each record carries where its timestamp came from, a
@@ -53,7 +55,8 @@ and I2C must be enabled (`raspi-config nonint do_i2c 0`).
 loads `w1-gpio` on GPIO 4). The transport sends raw reset, write and read
 commands over the w1 netlink connector, so the DS18B20 protocol runs in the
 driver, not in the kernel's `w1_therm`. On the tested kernel this needs no
-root privileges. `ds18b20-read --bus N` takes the master number of
+root privileges. The DS18B20 must be externally powered (VCC connected);
+parasite power needs a strong pull-up the transport cannot give. `ds18b20-read --bus N` takes the master number of
 `w1_bus_masterN`.
 
 ## Checks

@@ -153,6 +153,7 @@ pub struct Bmp280<I> {
     seq: u32,
     cal: Option<Calibration>,
     announce_epoch: bool,
+    initialized_before: bool,
 }
 
 impl<I: I2c> Bmp280<I> {
@@ -166,6 +167,7 @@ impl<I: I2c> Bmp280<I> {
             seq: 0,
             cal: None,
             announce_epoch: true,
+            initialized_before: false,
         }
     }
 
@@ -197,6 +199,12 @@ impl<I: I2c> Bmp280<I> {
         let cal = Calibration::from_bytes(&raw)?;
         self.write_reg(clock, REG_CONFIG, CONFIG)?;
         self.cal = Some(cal);
+        // A second init is a restart: a new epoch, and the sequence restarts.
+        if self.initialized_before {
+            self.epoch = self.epoch.wrapping_add(1);
+        }
+        self.initialized_before = true;
+        self.seq = 0;
         self.announce_epoch = true;
         Ok(())
     }
@@ -293,7 +301,7 @@ fn wait_or_timeout<C: Clock>(clock: &C, deadline: Instant) -> Result<(), Error> 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use sensor_fake::{FakeClock, FakeI2c, RegisterDevice};
+    use sensor_fake::{FakeClock, FakeDevice, FakeI2c, RegisterDevice};
 
     /// Calibration read from a SunFounder BMP280 module on 2026-09-30.
     const MODULE_CALIB: [u8; 24] = [
@@ -369,6 +377,117 @@ mod tests {
     }
 
     #[test]
+    fn registers_and_bits_match_the_datasheet() {
+        // Section 4.3: id 0xD0, reset 0xE0 with 0xB6, status 0xF3 (measuring
+        // bit 3, im_update bit 0), ctrl_meas 0xF4, config 0xF5, data 0xF7.
+        // ctrl_meas 0x25 is osrs_t x1, osrs_p x1, forced mode.
+        let clock = FakeClock::new();
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_LOW, 5, 1);
+        s.init(&clock).unwrap();
+        s.read(&clock).unwrap();
+        let i2c = s.release();
+        assert_eq!(
+            i2c.register_writes(0x76),
+            [(0xE0, 0xB6), (0xF5, 0x00), (0xF4, 0x25)]
+        );
+        let reads: Vec<_> = i2c
+            .log
+            .iter()
+            .filter(|t| t.read_len > 0)
+            .map(|t| (t.write[0], t.read_len))
+            .collect();
+        assert_eq!(
+            reads,
+            [(0xD0, 1), (0xF3, 1), (0x88, 24), (0xF3, 1), (0xF7, 6)]
+        );
+    }
+
+    /// The chip, with its status register busy for a number of reads after a
+    /// reset (im_update, 0x01) or after a forced conversion starts
+    /// (measuring, 0x08).
+    struct Busy {
+        inner: RegisterDevice,
+        after_reset: usize,
+        after_measure: usize,
+        pending: usize,
+        bits: u8,
+    }
+
+    impl FakeDevice for Busy {
+        fn addr(&self) -> u8 {
+            self.inner.addr
+        }
+
+        fn transfer(&mut self, w: &[u8], r: &mut [u8]) -> Result<(), BusError> {
+            if w == [0xE0, 0xB6] {
+                (self.pending, self.bits) = (self.after_reset, 0x01);
+            }
+            if w.len() == 2 && w[0] == 0xF4 && w[1] & 0b11 == 0b01 {
+                (self.pending, self.bits) = (self.after_measure, 0x08);
+            }
+            if w == [0xF3] && !r.is_empty() {
+                self.inner.regs[0xF3] = if self.pending > 0 {
+                    self.pending -= 1;
+                    self.bits
+                } else {
+                    0
+                };
+            }
+            self.inner.transfer(w, r)
+        }
+    }
+
+    fn busy(after_reset: usize, after_measure: usize) -> FakeI2c {
+        FakeI2c::with_device(Busy {
+            inner: chip(),
+            after_reset,
+            after_measure,
+            pending: 0,
+            bits: 0,
+        })
+    }
+
+    fn status_reads(i2c: &FakeI2c) -> usize {
+        i2c.log
+            .iter()
+            .filter(|t| t.write == [0xF3] && t.read_len == 1)
+            .count()
+    }
+
+    #[test]
+    fn init_waits_for_the_calibration_copy() {
+        let clock = FakeClock::new();
+        let mut s = Bmp280::new(busy(3, 0), ADDR_SDO_LOW, 5, 1);
+        s.init(&clock).unwrap();
+        assert_eq!(status_reads(&s.release()), 4);
+    }
+
+    #[test]
+    fn read_waits_while_measuring() {
+        let clock = FakeClock::new();
+        let mut s = Bmp280::new(busy(0, 3), ADDR_SDO_LOW, 5, 1);
+        s.init(&clock).unwrap();
+        let before = clock.now();
+        s.read(&clock).unwrap();
+        let waited = clock.now().saturating_duration_since(before);
+        assert!(waited >= MEASURE_TYPICAL + 3 * POLL, "{waited:?}");
+        assert_eq!(status_reads(&s.release()), 1 + 4);
+    }
+
+    #[test]
+    fn a_second_init_starts_a_new_epoch() {
+        let clock = FakeClock::new();
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_LOW, 5, 7);
+        s.init(&clock).unwrap();
+        s.read(&clock).unwrap();
+        s.read(&clock).unwrap();
+        s.init(&clock).unwrap();
+        let after = s.read(&clock).unwrap();
+        assert_eq!((after.epoch, after.seq), (8, 0));
+        assert!(after.flags().contains(Flags::NEW_EPOCH));
+    }
+
+    #[test]
     fn a_different_chip_is_refused() {
         let mut dev = chip();
         dev.regs[usize::from(REG_ID)] = 0x60; // BME280
@@ -387,7 +506,7 @@ mod tests {
     fn a_stuck_conversion_times_out() {
         let clock = FakeClock::new();
         let mut dev = chip();
-        dev.regs[usize::from(REG_STATUS)] = STATUS_MEASURING;
+        dev.regs[0xF3] = 0x08; // measuring, datasheet section 4.3.3
         let mut s = Bmp280::new(FakeI2c::with_device(dev), ADDR_SDO_LOW, 5, 1);
         s.init(&clock).unwrap();
         let start = clock.now();

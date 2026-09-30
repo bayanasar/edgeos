@@ -113,13 +113,25 @@ impl LinuxW1 {
         if rc == 0 {
             return Ok(None);
         }
-        // SAFETY: `buf` is writable for its full length.
-        let n = unsafe { libc::recv(self.sock.as_raw_fd(), buf.as_mut_ptr().cast(), buf.len(), 0) };
+        let mut from = netlink_addr();
+        let mut from_len = mem::size_of::<libc::sockaddr_nl>() as libc::socklen_t;
+        // SAFETY: `buf` is writable for its full length; `from` and
+        // `from_len` describe a writable sockaddr_nl.
+        let n = unsafe {
+            libc::recvfrom(
+                self.sock.as_raw_fd(),
+                buf.as_mut_ptr().cast(),
+                buf.len(),
+                0,
+                (&mut from as *mut libc::sockaddr_nl).cast(),
+                &mut from_len,
+            )
+        };
         if n < 0 {
-            Err(BusError::Io)
-        } else {
-            Ok(Some(n as usize))
+            return Err(BusError::Io);
         }
+        // Only the kernel (port 0) speaks for the w1 core; drop anything else.
+        Ok(Some(if from.nl_pid == 0 { n as usize } else { 0 }))
     }
 }
 
@@ -177,8 +189,52 @@ fn request(seq: u32, master: u32, write: &[u8], read_len: usize) -> Vec<u8> {
 /// What the replies so far have told us.
 #[derive(Default, Debug, PartialEq, Eq)]
 struct Replies {
+    /// (command, status) for each command the kernel has finished.
     statuses: Vec<(u8, u8)>,
     data: Option<Vec<u8>>,
+    /// Set when the kernel rejected the whole message (for example ENODEV
+    /// for a master that does not exist); it then sends no command replies.
+    message_error: Option<u8>,
+}
+
+const ENODEV: u8 = 19;
+
+/// One status reply per command sent: reset, then write and read if present.
+fn expected_statuses(write: &[u8], read: &[u8]) -> usize {
+    1 + usize::from(!write.is_empty()) + usize::from(!read.is_empty())
+}
+
+/// Decides the transaction once the replies are complete: `None` while
+/// command statuses are still outstanding.
+fn outcome(r: &Replies, expected: usize, read: &mut [u8]) -> Option<Result<(), BusError>> {
+    if let Some(e) = r.message_error {
+        return Some(Err(if e == ENODEV {
+            BusError::Invalid
+        } else {
+            BusError::Io
+        }));
+    }
+    if r.statuses.len() < expected {
+        return None;
+    }
+    for &(op, status) in &r.statuses {
+        if status != 0 {
+            // A reset with no presence pulse reports 1 from w1_reset_bus,
+            // which the kernel sends as (u8)-1.
+            return Some(Err(if op == W1_CMD_RESET {
+                BusError::NoPresence
+            } else {
+                BusError::Io
+            }));
+        }
+    }
+    if !read.is_empty() {
+        match &r.data {
+            Some(d) if d.len() == read.len() => read.copy_from_slice(d),
+            _ => return Some(Err(BusError::Io)),
+        }
+    }
+    Some(Ok(()))
 }
 
 /// Parses one received datagram, keeping replies to `seq`.
@@ -188,7 +244,7 @@ fn parse(buf: &[u8], seq: u32, out: &mut Replies) {
     let mut nl = 0;
     while nl + NLMSG_HDR + CN_HDR <= buf.len() {
         let nl_len = u32_at(buf, nl) as usize;
-        if nl_len < NLMSG_HDR + CN_HDR || nl + nl_len > buf.len() {
+        if nl_len < NLMSG_HDR + CN_HDR || nl_len > buf.len() - nl {
             return;
         }
         let cn = &buf[nl + NLMSG_HDR..nl + nl_len];
@@ -200,6 +256,9 @@ fn parse(buf: &[u8], seq: u32, out: &mut Replies) {
             while m + MSG_HDR <= data.len() {
                 let (kind, status, len) = (data[m], data[m + 1], u16_at(data, m + 2));
                 let body = &data[m + MSG_HDR..(m + MSG_HDR + len).min(data.len())];
+                if kind == W1_MASTER_CMD && len == 0 && status != 0 {
+                    out.message_error = Some(status);
+                }
                 if kind == W1_MASTER_CMD {
                     let mut c = 0;
                     while c + CMD_HDR <= body.len() {
@@ -232,35 +291,21 @@ impl OneWire for LinuxW1 {
         }
         self.seq = self.seq.wrapping_add(1);
         let seq = self.seq;
-        let expected = 1 + usize::from(!write.is_empty()) + usize::from(!read.is_empty());
+        let expected = expected_statuses(write, read);
         self.send(&request(seq, self.master, write, read.len()))
             .map_err(|_| BusError::Io)?;
 
         let mut replies = Replies::default();
         let mut buf = vec![0u8; 16 * 1024];
-        while replies.statuses.len() < expected {
+        loop {
+            if let Some(result) = outcome(&replies, expected, read) {
+                return result;
+            }
             match self.recv(&mut buf, deadline)? {
                 Some(n) => parse(&buf[..n], seq, &mut replies),
                 None => return Err(BusError::Timeout),
             }
         }
-        for &(op, status) in &replies.statuses {
-            if status != 0 {
-                return Err(if op == W1_CMD_RESET {
-                    BusError::NoPresence
-                } else {
-                    BusError::Io
-                });
-            }
-        }
-        if !read.is_empty() {
-            let data = replies.data.ok_or(BusError::Io)?;
-            if data.len() != read.len() {
-                return Err(BusError::Io);
-            }
-            read.copy_from_slice(&data);
-        }
-        Ok(())
     }
 }
 
@@ -305,6 +350,8 @@ mod tests {
         assert_eq!(r.len() % 4, 0);
         let cn = &r[16..];
         assert_eq!(u32::from_ne_bytes(cn[8..12].try_into().unwrap()), 7);
+        assert_eq!(&cn[0..8], &[3, 0, 0, 0, 1, 0, 0, 0]); // CN_W1_IDX, CN_W1_VAL
+        assert_eq!(&cn[18..20], &[0, 0], "no W1_CN_BUNDLE");
         assert_eq!(
             u16::from_ne_bytes(cn[16..18].try_into().unwrap()),
             12 + 4 + 6 + 13
@@ -320,6 +367,74 @@ mod tests {
             (W1_CMD_RESET, W1_CMD_WRITE, W1_CMD_READ)
         );
         assert_eq!(&cmds[8..10], &[0xCC, 0xBE]);
+    }
+
+    fn feed(r: &mut Replies, d: Vec<u8>) {
+        parse(&d, 9, r);
+    }
+
+    #[test]
+    fn the_transaction_completes_only_after_the_last_status() {
+        // Kernel order for reset, write, read: status, status, data, status.
+        let mut r = Replies::default();
+        let mut read = [0u8; 3];
+        feed(&mut r, reply(9, 0, W1_CMD_RESET, &[]));
+        assert_eq!(outcome(&r, 3, &mut read), None);
+        feed(&mut r, reply(9, 0, W1_CMD_WRITE, &[]));
+        assert_eq!(outcome(&r, 3, &mut read), None);
+        feed(&mut r, reply(9, 0, W1_CMD_READ, &[7, 8, 9]));
+        assert_eq!(outcome(&r, 3, &mut read), None);
+        feed(&mut r, reply(9, 0, W1_CMD_READ, &[]));
+        assert_eq!(outcome(&r, 3, &mut read), Some(Ok(())));
+        assert_eq!(read, [7, 8, 9]);
+    }
+
+    #[test]
+    fn one_status_is_expected_per_command_sent() {
+        assert_eq!(expected_statuses(&[0xCC, 0x44], &[]), 2);
+        assert_eq!(expected_statuses(&[0xCC, 0xBE], &[0; 9]), 3);
+        assert_eq!(expected_statuses(&[], &[]), 1);
+        // The request carries exactly that many commands.
+        let r = request(1, 1, &[0xCC, 0xBE], 9);
+        assert_eq!(r[16 + 20 + 12], W1_CMD_RESET);
+    }
+
+    #[test]
+    fn no_presence_and_command_errors_are_distinguished() {
+        let mut r = Replies::default();
+        feed(&mut r, reply(9, 255, W1_CMD_RESET, &[])); // (u8)-1 from w1_reset_bus
+        feed(&mut r, reply(9, 0, W1_CMD_WRITE, &[]));
+        assert_eq!(outcome(&r, 2, &mut []), Some(Err(BusError::NoPresence)));
+
+        let mut r = Replies::default();
+        feed(&mut r, reply(9, 0, W1_CMD_RESET, &[]));
+        feed(&mut r, reply(9, 22, W1_CMD_WRITE, &[])); // EINVAL
+        assert_eq!(outcome(&r, 2, &mut []), Some(Err(BusError::Io)));
+    }
+
+    #[test]
+    fn missing_or_short_read_data_is_an_error() {
+        let mut r = Replies::default();
+        feed(&mut r, reply(9, 0, W1_CMD_RESET, &[]));
+        feed(&mut r, reply(9, 0, W1_CMD_READ, &[]));
+        assert_eq!(outcome(&r, 2, &mut [0; 2]), Some(Err(BusError::Io)));
+        feed(&mut r, reply(9, 0, W1_CMD_READ, &[1]));
+        assert_eq!(outcome(&r, 2, &mut [0; 2]), Some(Err(BusError::Io)));
+    }
+
+    #[test]
+    fn a_rejected_message_fails_at_once() {
+        // w1_netlink_send_error: the request's message, length 0, status set.
+        let mut msg_only = reply(9, ENODEV, W1_CMD_RESET, &[]);
+        let cmd_start = NLMSG_HDR + CN_HDR + MSG_HDR;
+        msg_only.truncate(cmd_start);
+        msg_only[NLMSG_HDR + CN_HDR + 2..NLMSG_HDR + CN_HDR + 4]
+            .copy_from_slice(&0u16.to_ne_bytes());
+        msg_only[NLMSG_HDR + 16..NLMSG_HDR + 18].copy_from_slice(&(MSG_HDR as u16).to_ne_bytes());
+        msg_only[0..4].copy_from_slice(&(cmd_start as u32).to_ne_bytes());
+        let mut r = Replies::default();
+        feed(&mut r, msg_only);
+        assert_eq!(outcome(&r, 3, &mut [0; 9]), Some(Err(BusError::Invalid)));
     }
 
     #[test]
