@@ -1,0 +1,13 @@
+[package]
+name = "sensor-linux"
+version = "0.1.0"
+description = "Linux transport for sensor-core: i2c-dev and the monotonic clock"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+libc = "0.2"
+sensor-core = { path = "../core" }
+sensor-bmp280 = { path = "../drivers/bmp280" }

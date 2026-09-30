@@ -3,7 +3,14 @@
 Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
-Status: interface only. No drivers yet.
+Status: one driver (BMP280), verified on a Raspberry Pi 5 over Linux I2C.
+
+| Crate | What it is |
+|---|---|
+| `core` (`sensor-core`) | The contract: bus traits and sample records |
+| `drivers/bmp280` (`sensor-bmp280`) | Bosch BMP280 pressure and temperature, I2C |
+| `fake` (`sensor-fake`) | Fake clock and I2C bus for driver tests |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, `CLOCK_MONOTONIC`) and `bmp280-read` |
 
 ## `sensor-core`
 
@@ -24,6 +31,21 @@ point, no `unsafe`.
 
 There is no ADC primitive (an ADC is a device on a bus) and no pulse primitive
 (a pulse is two timestamped edges).
+
+## Running on a Raspberry Pi
+
+`.cargo/config.toml` links the static `aarch64-unknown-linux-musl` target with
+`rust-lld`, so no cross C toolchain is needed:
+
+```sh
+rustup target add aarch64-unknown-linux-musl
+cargo build --release --target aarch64-unknown-linux-musl -p sensor-linux --bin bmp280-read
+# copy target/aarch64-unknown-linux-musl/release/bmp280-read to the Pi, then:
+./bmp280-read --bus 1 --addr 0x76 --count 10 --interval-ms 1000
+```
+
+The user needs access to `/dev/i2c-1` (the `i2c` group on Raspberry Pi OS),
+and I2C must be enabled (`raspi-config nonint do_i2c 0`).
 
 ## Checks
 
