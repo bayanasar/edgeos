@@ -1,9 +1,8 @@
 # eco — edge compute open toolkit
 
-Generic, reusable pieces of the SoC / edge / ML-sensor platform: kernel-operation
-demos today; sensor drivers, memory, filesystem and inter-driver protocol as they
-stabilise. Program-specific strategy and integration stay in the closed `doc`
-repo (ADR-0001).
+Generic, reusable pieces of an SoC / edge / ML-sensor platform: seL4 tooling
+today; sensor drivers, memory, filesystem and inter-driver protocol as they
+stabilise.
 
 ## Status — read this before using anything here
 
@@ -30,8 +29,8 @@ Files derived from upstream projects keep their upstream licence and say so in
 an SPDX header. `kernel_architecture/sel4/iommu_gate/CMakeLists.txt` and
 `settings.cmake` are BSD-2-Clause, from seL4test.
 
-No publication path is configured. A public copy is made only after the
-contributor above agrees and the full history passes a privacy review.
+This repository is public. The exceptions above still apply to the listed
+files until their contributor agrees.
 
 ### What the demos actually are
 
