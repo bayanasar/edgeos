@@ -175,3 +175,39 @@ impl I2c for FakeI2c {
         Ok(())
     }
 }
+
+/// Answers one 1-Wire transaction: the bytes written after the reset, and a
+/// buffer for the bytes to read back.
+pub type OneWireResponder = Box<dyn FnMut(&[u8], &mut [u8]) -> Result<(), BusError>>;
+
+/// A 1-Wire bus with at most one device, modelled by a responder. With no
+/// responder the reset sees no presence pulse.
+#[derive(Default)]
+pub struct FakeOneWire {
+    pub device: Option<OneWireResponder>,
+    /// Bytes written by each transaction, and how many were read back.
+    pub log: Vec<(Vec<u8>, usize)>,
+}
+
+impl FakeOneWire {
+    pub fn with_device(responder: OneWireResponder) -> Self {
+        FakeOneWire {
+            device: Some(responder),
+            log: Vec::new(),
+        }
+    }
+}
+
+impl sensor_core::bus::OneWire for FakeOneWire {
+    fn transaction(
+        &mut self,
+        write: &[u8],
+        read: &mut [u8],
+        _deadline: Instant,
+    ) -> Result<(), BusError> {
+        let dev = self.device.as_mut().ok_or(BusError::NoPresence)?;
+        dev(write, read)?;
+        self.log.push((write.to_vec(), read.len()));
+        Ok(())
+    }
+}

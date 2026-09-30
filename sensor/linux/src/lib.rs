@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Linux transport: the monotonic clock and I2C through `/dev/i2c-N`.
+//! Linux transport: the monotonic clock, I2C through `/dev/i2c-N`, and 1-Wire
+//! through the kernel's w1 netlink interface.
 //!
 //! This crate is platform code, so it is the one place that calls into libc.
 //! Every `unsafe` block is a single system call on memory this code owns.
@@ -10,6 +11,9 @@ use std::os::fd::AsRawFd;
 use std::time::Duration;
 
 use sensor_core::bus::{BusError, Clock, I2c, Instant};
+
+mod w1;
+pub use w1::{LinuxW1, TRANSACTION_TIMEOUT as W1_TRANSACTION_TIMEOUT};
 
 /// `CLOCK_MONOTONIC`, in nanoseconds.
 #[derive(Clone, Copy, Debug, Default)]

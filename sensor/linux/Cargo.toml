@@ -1,7 +1,7 @@
 [package]
 name = "sensor-linux"
 version = "0.1.0"
-description = "Linux transport for sensor-core: i2c-dev and the monotonic clock"
+description = "Linux transport for sensor-core: i2c-dev, w1 netlink and the monotonic clock"
 edition.workspace = true
 license.workspace = true
 rust-version.workspace = true
@@ -12,3 +12,4 @@ libc = "0.2"
 sensor-core = { path = "../core" }
 sensor-bmp280 = { path = "../drivers/bmp280" }
 sensor-pcf8591 = { path = "../drivers/pcf8591" }
+sensor-ds18b20 = { path = "../drivers/ds18b20" }

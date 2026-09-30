@@ -3,15 +3,16 @@
 Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
-Status: two I2C drivers (BMP280, PCF8591), verified on a Raspberry Pi 5 over Linux.
+Status: three drivers (BMP280, PCF8591, DS18B20), verified on a Raspberry Pi 5 over Linux.
 
 | Crate | What it is |
 |---|---|
 | `core` (`sensor-core`) | The contract: bus traits and sample records |
 | `drivers/bmp280` (`sensor-bmp280`) | Bosch BMP280 pressure and temperature, I2C |
 | `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
-| `fake` (`sensor-fake`) | Fake clock and I2C bus with pluggable device models |
-| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read` tools |
+| `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
+| `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read` tools |
 
 ## `sensor-core`
 
@@ -47,6 +48,13 @@ cargo build --release --target aarch64-unknown-linux-musl -p sensor-linux --bin 
 
 The user needs access to `/dev/i2c-1` (the `i2c` group on Raspberry Pi OS),
 and I2C must be enabled (`raspi-config nonint do_i2c 0`).
+
+1-Wire goes through the kernel's w1 core (`raspi-config nonint do_onewire 0`
+loads `w1-gpio` on GPIO 4). The transport sends raw reset, write and read
+commands over the w1 netlink connector, so the DS18B20 protocol runs in the
+driver, not in the kernel's `w1_therm`. On the tested kernel this needs no
+root privileges. `ds18b20-read --bus N` takes the master number of
+`w1_bus_masterN`.
 
 ## Checks
 
