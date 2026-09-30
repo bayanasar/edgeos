@@ -346,7 +346,7 @@ mod tests {
     #[test]
     fn module_reading_matches_the_hand_calculation() {
         let clock = FakeClock::new();
-        let mut s = Bmp280::new(FakeI2c::new(vec![chip()]), ADDR_SDO_LOW, 5, 1);
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_LOW, 5, 1);
         s.init(&clock).unwrap();
         let sample = s.read(&clock).unwrap();
         let ch = sample.channels().unwrap();
@@ -359,7 +359,7 @@ mod tests {
     #[test]
     fn init_resets_and_configures() {
         let clock = FakeClock::new();
-        let mut s = Bmp280::new(FakeI2c::new(vec![chip()]), ADDR_SDO_LOW, 5, 1);
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_LOW, 5, 1);
         s.init(&clock).unwrap();
         assert_eq!(
             s.release().register_writes(ADDR_SDO_LOW),
@@ -372,14 +372,14 @@ mod tests {
     fn a_different_chip_is_refused() {
         let mut dev = chip();
         dev.regs[usize::from(REG_ID)] = 0x60; // BME280
-        let mut s = Bmp280::new(FakeI2c::new(vec![dev]), ADDR_SDO_LOW, 5, 1);
+        let mut s = Bmp280::new(FakeI2c::with_device(dev), ADDR_SDO_LOW, 5, 1);
         assert_eq!(s.init(&FakeClock::new()), Err(Error::WrongChip(0x60)));
         assert_eq!(s.read(&FakeClock::new()), Err(Error::NotInitialized));
     }
 
     #[test]
     fn a_missing_chip_is_a_nak() {
-        let mut s = Bmp280::new(FakeI2c::new(vec![chip()]), ADDR_SDO_HIGH, 5, 1);
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_HIGH, 5, 1);
         assert_eq!(s.init(&FakeClock::new()), Err(Error::Bus(BusError::Nak)));
     }
 
@@ -388,7 +388,7 @@ mod tests {
         let clock = FakeClock::new();
         let mut dev = chip();
         dev.regs[usize::from(REG_STATUS)] = STATUS_MEASURING;
-        let mut s = Bmp280::new(FakeI2c::new(vec![dev]), ADDR_SDO_LOW, 5, 1);
+        let mut s = Bmp280::new(FakeI2c::with_device(dev), ADDR_SDO_LOW, 5, 1);
         s.init(&clock).unwrap();
         let start = clock.now();
         assert_eq!(s.read(&clock), Err(Error::NotReady));
@@ -398,18 +398,12 @@ mod tests {
     #[test]
     fn a_skipped_measurement_is_not_data() {
         let clock = FakeClock::new();
-        let mut dev = chip();
-        dev.regs[usize::from(REG_CTRL_MEAS)] = 0;
-        let mut s = Bmp280::new(
-            FakeI2c::new(vec![dev.with_hook(Box::new(|reg, _, regs| {
-                if reg == REG_CTRL_MEAS {
-                    regs[0xF7..0xFD].copy_from_slice(&[0x80, 0, 0, 0x80, 0, 0]);
-                }
-            }))]),
-            ADDR_SDO_LOW,
-            5,
-            1,
-        );
+        let dev = chip().with_hook(Box::new(|reg, _, regs| {
+            if reg == REG_CTRL_MEAS {
+                regs[0xF7..0xFD].copy_from_slice(&[0x80, 0, 0, 0x80, 0, 0]);
+            }
+        }));
+        let mut s = Bmp280::new(FakeI2c::with_device(dev), ADDR_SDO_LOW, 5, 1);
         s.init(&clock).unwrap();
         assert_eq!(s.read(&clock), Err(Error::NoData));
     }
@@ -417,7 +411,7 @@ mod tests {
     #[test]
     fn samples_carry_sequence_and_epoch() {
         let clock = FakeClock::new();
-        let mut s = Bmp280::new(FakeI2c::new(vec![chip()]), ADDR_SDO_LOW, 5, 7);
+        let mut s = Bmp280::new(FakeI2c::with_device(chip()), ADDR_SDO_LOW, 5, 7);
         s.init(&clock).unwrap();
         let a = s.read(&clock).unwrap();
         let b = s.read(&clock).unwrap();
@@ -430,7 +424,7 @@ mod tests {
     #[test]
     fn a_bus_error_is_reported() {
         let clock = FakeClock::new();
-        let mut i2c = FakeI2c::new(vec![chip()]);
+        let mut i2c = FakeI2c::with_device(chip());
         i2c.fail_next = Some(BusError::Io);
         let mut s = Bmp280::new(i2c, ADDR_SDO_LOW, 5, 1);
         assert_eq!(s.init(&clock), Err(Error::Bus(BusError::Io)));

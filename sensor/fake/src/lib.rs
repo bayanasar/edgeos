@@ -1,11 +1,11 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! A fake clock and a fake I2C bus for driver tests.
 //!
-//! The I2C bus holds register-file devices: a write sets the register pointer
-//! from its first byte and stores the rest, a read returns bytes from the
-//! pointer, both auto-incrementing, which is how most sensor chips behave.
-//! A per-device hook sees every register write, so a test can model what the
-//! chip does in response (start a conversion, reset).
+//! The I2C bus routes each transfer to a [`FakeDevice`] by address.
+//! [`RegisterDevice`] models the common register-pointer chip; a per-device
+//! hook sees every register write, so a test can model what the chip does in
+//! response (start a conversion, reset). Chips that behave differently
+//! implement [`FakeDevice`] themselves.
 
 #![forbid(unsafe_code)]
 
@@ -42,10 +42,19 @@ impl Clock for FakeClock {
     }
 }
 
+/// A device on the fake bus. It sees each transfer addressed to it.
+pub trait FakeDevice {
+    fn addr(&self) -> u8;
+    fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), BusError>;
+}
+
 /// Called after each register write with the register, the value and the
 /// device's register file.
 pub type WriteHook = Box<dyn FnMut(u8, u8, &mut [u8; 256])>;
 
+/// A chip with a register pointer: a write sets the pointer from its first
+/// byte and stores the rest, a read returns bytes from the pointer, both
+/// auto-incrementing.
 pub struct RegisterDevice {
     pub addr: u8,
     pub regs: [u8; 256],
@@ -69,6 +78,31 @@ impl RegisterDevice {
     }
 }
 
+impl FakeDevice for RegisterDevice {
+    fn addr(&self) -> u8 {
+        self.addr
+    }
+
+    fn transfer(&mut self, write: &[u8], read: &mut [u8]) -> Result<(), BusError> {
+        if let Some((&reg, data)) = write.split_first() {
+            self.ptr = reg;
+            for &v in data {
+                let r = self.ptr;
+                self.regs[usize::from(r)] = v;
+                if let Some(hook) = self.hook.as_mut() {
+                    hook(r, v, &mut self.regs);
+                }
+                self.ptr = self.ptr.wrapping_add(1);
+            }
+        }
+        for b in read.iter_mut() {
+            *b = self.regs[usize::from(self.ptr)];
+            self.ptr = self.ptr.wrapping_add(1);
+        }
+        Ok(())
+    }
+}
+
 /// One completed transfer, for assertions.
 #[derive(Clone, Debug, PartialEq, Eq)]
 pub struct Transfer {
@@ -79,28 +113,26 @@ pub struct Transfer {
 
 #[derive(Default)]
 pub struct FakeI2c {
-    pub devices: Vec<RegisterDevice>,
+    pub devices: Vec<Box<dyn FakeDevice>>,
     pub log: Vec<Transfer>,
     /// Returned by the next transfer instead of performing it.
     pub fail_next: Option<BusError>,
 }
 
 impl FakeI2c {
-    pub fn new(devices: Vec<RegisterDevice>) -> Self {
+    pub fn new(devices: Vec<Box<dyn FakeDevice>>) -> Self {
         FakeI2c {
             devices,
             ..Self::default()
         }
     }
 
-    pub fn device(&mut self, addr: u8) -> &mut RegisterDevice {
-        self.devices
-            .iter_mut()
-            .find(|d| d.addr == addr)
-            .expect("no fake device at address")
+    pub fn with_device(dev: impl FakeDevice + 'static) -> Self {
+        Self::new(vec![Box::new(dev)])
     }
 
-    /// Register writes seen so far, as (register, value) pairs.
+    /// Register writes seen so far, as (register, value) pairs. Meaningful
+    /// for register-pointer devices only.
     pub fn register_writes(&self, addr: u8) -> Vec<(u8, u8)> {
         self.log
             .iter()
@@ -132,23 +164,9 @@ impl I2c for FakeI2c {
         let dev = self
             .devices
             .iter_mut()
-            .find(|d| d.addr == addr)
+            .find(|d| d.addr() == addr)
             .ok_or(BusError::Nak)?;
-        if let Some((&reg, data)) = write.split_first() {
-            dev.ptr = reg;
-            for &v in data {
-                let r = dev.ptr;
-                dev.regs[usize::from(r)] = v;
-                if let Some(hook) = dev.hook.as_mut() {
-                    hook(r, v, &mut dev.regs);
-                }
-                dev.ptr = dev.ptr.wrapping_add(1);
-            }
-        }
-        for b in read.iter_mut() {
-            *b = dev.regs[usize::from(dev.ptr)];
-            dev.ptr = dev.ptr.wrapping_add(1);
-        }
+        dev.transfer(write, read)?;
         self.log.push(Transfer {
             addr,
             write: write.to_vec(),

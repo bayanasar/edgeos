@@ -3,14 +3,15 @@
 Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
-Status: one driver (BMP280), verified on a Raspberry Pi 5 over Linux I2C.
+Status: two I2C drivers (BMP280, PCF8591), verified on a Raspberry Pi 5 over Linux.
 
 | Crate | What it is |
 |---|---|
 | `core` (`sensor-core`) | The contract: bus traits and sample records |
 | `drivers/bmp280` (`sensor-bmp280`) | Bosch BMP280 pressure and temperature, I2C |
-| `fake` (`sensor-fake`) | Fake clock and I2C bus for driver tests |
-| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, `CLOCK_MONOTONIC`) and `bmp280-read` |
+| `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
+| `fake` (`sensor-fake`) | Fake clock and I2C bus with pluggable device models |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read` tools |
 
 ## `sensor-core`
 

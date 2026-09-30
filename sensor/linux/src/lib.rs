@@ -139,6 +139,41 @@ impl I2c for LinuxI2c {
     }
 }
 
+/// Command-line options shared by the read tools.
+pub struct ReadArgs {
+    pub bus: u32,
+    pub addr: u8,
+    pub count: Option<u64>,
+    pub interval: Duration,
+}
+
+impl ReadArgs {
+    /// Parses `--bus N --addr 0xNN --count N --interval-ms N`.
+    pub fn parse(default_addr: u8, args: impl Iterator<Item = String>) -> Result<Self, String> {
+        let mut a = ReadArgs {
+            bus: 1,
+            addr: default_addr,
+            count: None,
+            interval: Duration::from_secs(1),
+        };
+        let mut it = args;
+        while let Some(flag) = it.next() {
+            let value = it.next().ok_or(format!("{flag} needs a value"))?;
+            let bad = |_| format!("bad value for {flag}: {value}");
+            match flag.as_str() {
+                "--bus" => a.bus = value.parse().map_err(bad)?,
+                "--addr" => {
+                    a.addr = u8::from_str_radix(value.trim_start_matches("0x"), 16).map_err(bad)?
+                }
+                "--count" => a.count = Some(value.parse().map_err(bad)?),
+                "--interval-ms" => a.interval = Duration::from_millis(value.parse().map_err(bad)?),
+                _ => return Err(format!("unknown option {flag}")),
+            }
+        }
+        Ok(a)
+    }
+}
+
 /// Formats `value * 10^exp` without floating point.
 pub fn decimal(value: i32, exp: i8) -> String {
     let v = i64::from(value);
@@ -158,6 +193,23 @@ pub fn decimal(value: i32, exp: i8) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn options_parse_with_defaults() {
+        let a = ReadArgs::parse(0x48, std::iter::empty()).unwrap();
+        assert_eq!(
+            (a.bus, a.addr, a.count, a.interval),
+            (1, 0x48, None, Duration::from_secs(1))
+        );
+        let args = ["--addr", "0x76", "--count", "3", "--interval-ms", "250"].map(String::from);
+        let a = ReadArgs::parse(0x48, args.into_iter()).unwrap();
+        assert_eq!(
+            (a.addr, a.count, a.interval),
+            (0x76, Some(3), Duration::from_millis(250))
+        );
+        assert!(ReadArgs::parse(0x48, ["--addr".to_string()].into_iter()).is_err());
+        assert!(ReadArgs::parse(0x48, ["--nope", "1"].map(String::from).into_iter()).is_err());
+    }
 
     #[test]
     fn decimal_places_follow_the_exponent() {

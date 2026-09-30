@@ -1,0 +1,13 @@
+[package]
+name = "sensor-pcf8591"
+version = "0.1.0"
+description = "NXP PCF8591 8-bit four-channel ADC driver over sensor-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sensor-core = { path = "../../core" }
+
+[dev-dependencies]
+sensor-fake = { path = "../../fake" }

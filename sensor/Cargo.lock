@@ -34,4 +34,13 @@ dependencies = [
  "libc",
  "sensor-bmp280",
  "sensor-core",
+ "sensor-pcf8591",
+]
+
+[[package]]
+name = "sensor-pcf8591"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+ "sensor-fake",
 ]

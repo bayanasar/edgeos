@@ -11,3 +11,4 @@ publish = false
 libc = "0.2"
 sensor-core = { path = "../core" }
 sensor-bmp280 = { path = "../drivers/bmp280" }
+sensor-pcf8591 = { path = "../drivers/pcf8591" }
