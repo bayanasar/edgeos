@@ -54,6 +54,7 @@ kernel_architecture/
   sel4/        seL4test build and QEMU runner, IOMMU gate, RSB-3720 overlay;
                ipc_demo (stub)
   linux/       module, syscall and inspection demos (stubs)
+sensor/        portable sensor drivers in Rust; sensor-core interface
 ```
 
 ## Contributing
