@@ -29,8 +29,10 @@ Files derived from upstream projects keep their upstream licence and say so in
 an SPDX header. `kernel_architecture/sel4/iommu_gate/CMakeLists.txt` and
 `settings.cmake` are BSD-2-Clause, from seL4test.
 
-This repository is public. The exceptions above still apply to the listed
-files until their contributor agrees.
+This repository is public, every branch included: a branch is published as
+soon as it is pushed, so its name, commit messages and authorship are public
+from the first push. The exceptions above still apply to the listed files until
+their contributor agrees.
 
 ### What the demos actually are
 
