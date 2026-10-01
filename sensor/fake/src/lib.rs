@@ -159,7 +159,7 @@ impl I2c for FakeI2c {
         read: &mut [u8],
         _deadline: Instant,
     ) -> Result<(), BusError> {
-        if addr > 0x7f {
+        if addr > 0x7f || (write.is_empty() && read.is_empty()) {
             return Err(BusError::Invalid);
         }
         if let Some(e) = self.fail_next.take() {
