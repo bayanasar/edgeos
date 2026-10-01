@@ -115,32 +115,48 @@ impl Calibration {
     }
 
     /// Temperature in 0.01 degC, and `t_fine` for the pressure formula.
-    pub fn temperature(&self, adc_t: i32) -> (i32, i32) {
-        let t1 = i32::from(self.t1);
-        let var1 = (((adc_t >> 3) - (t1 << 1)) * i32::from(self.t2)) >> 11;
+    ///
+    /// The datasheet formula is written in 32 bits, but device-supplied
+    /// readings and trimming values can overflow it, so it runs in 64 bits,
+    /// where no `i32` input can overflow. `None` if a result does not fit
+    /// in 32 bits, which no 20-bit reading can cause.
+    pub fn temperature(&self, adc_t: i32) -> Option<(i32, i32)> {
+        let adc_t = i64::from(adc_t);
+        let t1 = i64::from(self.t1);
+        let var1 = (((adc_t >> 3) - (t1 << 1)) * i64::from(self.t2)) >> 11;
         let d = (adc_t >> 4) - t1;
-        let var2 = (((d * d) >> 12) * i32::from(self.t3)) >> 14;
+        let var2 = (((d * d) >> 12) * i64::from(self.t3)) >> 14;
         let t_fine = var1 + var2;
-        ((t_fine * 5 + 128) >> 8, t_fine)
+        let centi_c = i32::try_from((t_fine * 5 + 128) >> 8).ok()?;
+        Some((centi_c, i32::try_from(t_fine).ok()?))
     }
 
     /// Pressure in Pa as unsigned Q24.8, or `None` where the datasheet
-    /// formula would divide by zero.
+    /// formula would divide by zero or overflow 64 bits. Both need trimming
+    /// values or readings far outside what a working chip reports.
     pub fn pressure(&self, adc_p: i32, t_fine: i32) -> Option<u32> {
-        let mut var1 = i64::from(t_fine) - 128_000;
-        let mut var2 = var1 * var1 * i64::from(self.p6);
-        var2 += (var1 * i64::from(self.p5)) << 17;
-        var2 += i64::from(self.p4) << 35;
-        var1 = ((var1 * var1 * i64::from(self.p3)) >> 8) + ((var1 * i64::from(self.p2)) << 12);
-        var1 = (((1_i64 << 47) + var1) * i64::from(self.p1)) >> 33;
-        if var1 == 0 {
-            return None;
-        }
-        let mut p = 1_048_576 - i64::from(adc_p);
-        p = (((p << 31) - var2) * 3125) / var1;
-        let var1 = (i64::from(self.p9) * (p >> 13) * (p >> 13)) >> 25;
-        let var2 = (i64::from(self.p8) * p) >> 19;
-        p = ((p + var1 + var2) >> 8) + (i64::from(self.p7) << 4);
+        let var1 = i64::from(t_fine) - 128_000;
+        let var2 = var1.checked_mul(var1)?.checked_mul(i64::from(self.p6))?;
+        let var2 = var2.checked_add(var1.checked_mul(i64::from(self.p5))?.checked_mul(1 << 17)?)?;
+        let var2 = var2.checked_add(i64::from(self.p4) << 35)?;
+        let var1 = (var1.checked_mul(var1)?.checked_mul(i64::from(self.p3))? >> 8)
+            .checked_add(var1.checked_mul(i64::from(self.p2))?.checked_mul(1 << 12)?)?;
+        let var1 = (1_i64 << 47)
+            .checked_add(var1)?
+            .checked_mul(i64::from(self.p1))?
+            >> 33;
+        let p = (1_048_576 - i64::from(adc_p))
+            .checked_mul(1 << 31)?
+            .checked_sub(var2)?
+            .checked_mul(3125)?
+            .checked_div(var1)?;
+        let var1 = i64::from(self.p9)
+            .checked_mul(p >> 13)?
+            .checked_mul(p >> 13)?
+            >> 25;
+        let var2 = i64::from(self.p8).checked_mul(p)? >> 19;
+        let p =
+            (p.checked_add(var1)?.checked_add(var2)? >> 8).checked_add(i64::from(self.p7) << 4)?;
         u32::try_from(p).ok()
     }
 }
@@ -229,7 +245,7 @@ impl<I: I2c> Bmp280<I> {
         if adc_p == ADC_SKIPPED || adc_t == ADC_SKIPPED {
             return Err(Error::NoData);
         }
-        let (centi_c, t_fine) = cal.temperature(adc_t);
+        let (centi_c, t_fine) = cal.temperature(adc_t).ok_or(Error::NoData)?;
         let p_q24_8 = cal.pressure(adc_p, t_fine).ok_or(Error::NoData)?;
         // Q24.8 Pa to mPa; the result is below 2^31 for any pressure the
         // chip can report (300 to 1100 hPa).
@@ -345,10 +361,143 @@ mod tests {
             p8: -14600,
             p9: 6000,
         };
-        let (t, t_fine) = cal.temperature(519_888);
+        let (t, t_fine) = cal.temperature(519_888).unwrap();
         assert_eq!(t, 2508);
         let p = cal.pressure(415_148, t_fine).unwrap();
         assert!((i64::from(p) * 100 / 256 - 10_065_327).abs() <= 3, "{p}");
+    }
+
+    /// The datasheet's 32-bit temperature formula, or `None` where it
+    /// overflows.
+    fn temperature_i32(c: &Calibration, adc_t: i32) -> Option<(i32, i32)> {
+        let t1 = i32::from(c.t1);
+        let var1 = ((adc_t >> 3) - (t1 << 1)).checked_mul(i32::from(c.t2))? >> 11;
+        let d = (adc_t >> 4) - t1;
+        let var2 = (d.checked_mul(d)? >> 12).checked_mul(i32::from(c.t3))? >> 14;
+        let t_fine = var1.checked_add(var2)?;
+        Some((t_fine.checked_mul(5)?.checked_add(128)? >> 8, t_fine))
+    }
+
+    #[test]
+    fn temperature_matches_the_32_bit_formula_where_it_does_not_overflow() {
+        let mut compared = 0;
+        for t1 in (20_000..=35_000).step_by(1_500) {
+            for t2 in (20_000..=30_000).step_by(2_500) {
+                for t3 in (-2_000..=0).step_by(500) {
+                    let c = Calibration {
+                        t1,
+                        t2,
+                        t3,
+                        p1: 1,
+                        ..Calibration::default()
+                    };
+                    for adc_t in (0x6_0000..=0x9_0000).step_by(0x1_000) {
+                        if let Some(want) = temperature_i32(&c, adc_t) {
+                            assert_eq!(c.temperature(adc_t), Some(want), "{c:?} {adc_t}");
+                            compared += 1;
+                        }
+                    }
+                }
+            }
+        }
+        assert!(compared > 10_000, "{compared}");
+    }
+
+    #[test]
+    fn extreme_readings_and_trimming_do_not_overflow() {
+        // Full-scale reading with t1 = 1 overflows the 32-bit formula.
+        let c = Calibration {
+            t1: 1,
+            t2: i16::MAX,
+            t3: i16::MAX,
+            p1: 1,
+            ..Calibration::default()
+        };
+        assert_eq!(temperature_i32(&c, 0xF_FFFF), None);
+        // Expected values computed with arbitrary-precision integers.
+        assert_eq!(c.temperature(0xF_FFFF), Some((81_914, 4_194_000)));
+
+        // Every corner of the trimming space, at both ends of the reading
+        // range and of `t_fine`: each call returns without panicking, and any
+        // value it returns is the exact one.
+        let ends16 = [i16::MIN, i16::MAX];
+        let mut none = 0;
+        for &t1 in &[1, u16::MAX] {
+            for &t2 in &ends16 {
+                for &t3 in &ends16 {
+                    for &adc_t in &[0, 0xF_FFFF] {
+                        let tc = Calibration {
+                            t1,
+                            t2,
+                            t3,
+                            p1: 1,
+                            ..Calibration::default()
+                        };
+                        let (_, t_fine) = tc.temperature(adc_t).unwrap();
+                        for t_fine in [t_fine, i32::MIN, i32::MAX] {
+                            for bits in 0..1u32 << 9 {
+                                let e = |i: u32| ends16[((bits >> i) & 1) as usize];
+                                let c = Calibration {
+                                    p1: if bits & 1 == 0 { 1 } else { u16::MAX },
+                                    p2: e(1),
+                                    p3: e(2),
+                                    p4: e(3),
+                                    p5: e(4),
+                                    p6: e(5),
+                                    p7: e(6),
+                                    p8: e(7),
+                                    p9: e(8),
+                                    ..tc
+                                };
+                                for &adc_p in &[0, 0xF_FFFF] {
+                                    match c.pressure(adc_p, t_fine) {
+                                        Some(p) => assert_eq!(
+                                            pressure_i128(&c, adc_p, t_fine),
+                                            Some(p),
+                                            "{c:?} {adc_p} {t_fine}"
+                                        ),
+                                        None => none += 1,
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+        assert!(none > 0, "no corner exercised the overflow checks");
+    }
+
+    /// The pressure formula in 128 bits: exact wherever it returns a value.
+    fn pressure_i128(c: &Calibration, adc_p: i32, t_fine: i32) -> Option<u32> {
+        let v1 = i128::from(t_fine) - 128_000;
+        let v2 = v1.checked_mul(v1)?.checked_mul(i128::from(c.p6))?
+            + v1 * i128::from(c.p5) * (1 << 17)
+            + i128::from(c.p4) * (1 << 35);
+        let v1 = ((v1 * v1 * i128::from(c.p3)) >> 8) + v1 * i128::from(c.p2) * (1 << 12);
+        let v1 = (((1_i128 << 47) + v1) * i128::from(c.p1)) >> 33;
+        let p = (((1_048_576 - i128::from(adc_p)) << 31) - v2)
+            .checked_mul(3125)?
+            .checked_div(v1)?;
+        let v1 = i128::from(c.p9)
+            .checked_mul(p >> 13)?
+            .checked_mul(p >> 13)?
+            >> 25;
+        let v2 = (i128::from(c.p8) * p) >> 19;
+        u32::try_from(((p + v1 + v2) >> 8) + (i128::from(c.p7) << 4)).ok()
+    }
+
+    #[test]
+    fn a_zero_divisor_is_not_a_pressure() {
+        // p1 = 0 is refused by `from_bytes`, but the fields are public.
+        let c = Calibration {
+            t1: 27504,
+            t2: 26435,
+            p1: 0,
+            ..Calibration::default()
+        };
+        let (_, t_fine) = c.temperature(519_888).unwrap();
+        assert_eq!(c.pressure(415_148, t_fine), None);
     }
 
     #[test]

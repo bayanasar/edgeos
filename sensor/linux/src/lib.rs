@@ -95,12 +95,12 @@ impl I2c for LinuxI2c {
         read: &mut [u8],
         deadline: Instant,
     ) -> Result<(), BusError> {
-        if addr > 0x7f || write.len() > usize::from(u16::MAX) || read.len() > usize::from(u16::MAX)
+        if addr > 0x7f
+            || (write.is_empty() && read.is_empty())
+            || write.len() > usize::from(u16::MAX)
+            || read.len() > usize::from(u16::MAX)
         {
             return Err(BusError::Invalid);
-        }
-        if write.is_empty() && read.is_empty() {
-            return Ok(());
         }
         if self.clock.now() >= deadline {
             return Err(BusError::Timeout);
@@ -274,6 +274,12 @@ mod tests {
         );
         assert_eq!(
             i2c.transfer(0x80, &[0xD0], &mut [0], future),
+            Err(BusError::Invalid)
+        );
+        // An empty transfer is refused before the bus, not reported as a
+        // device that answered.
+        assert_eq!(
+            i2c.transfer(0x76, &[], &mut [], future),
             Err(BusError::Invalid)
         );
     }

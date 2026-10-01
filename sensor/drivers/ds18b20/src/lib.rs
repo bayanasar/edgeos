@@ -143,10 +143,16 @@ impl<W: OneWire> Ds18b20<W> {
 
     /// One conversion. The channel's raw value is the temperature register
     /// in 1/16 degC; its scaled value is degC with four decimals.
+    ///
+    /// The wait uses the resolution read last time. If the scratchpad now
+    /// shows a slower one, the conversion may not have finished and the
+    /// register may still hold the previous result, so the sample is marked
+    /// [`Flags::STALE`] and masked at the coarser of the two resolutions.
     pub fn read<C: Clock>(&mut self, clock: &C) -> Result<Sample, Error> {
+        let waited = self.resolution;
         self.bus
             .transaction(&[SKIP_ROM, CONVERT_T], &mut [], after(clock, TRANSFER)?)?;
-        clock.sleep_until(after(clock, self.resolution.conversion_time())?);
+        clock.sleep_until(after(clock, waited.conversion_time())?);
         let mut sp = [0u8; SCRATCHPAD_LEN];
         self.bus.transaction(
             &[SKIP_ROM, READ_SCRATCHPAD],
@@ -164,7 +170,13 @@ impl<W: OneWire> Ds18b20<W> {
             return Err(Error::BadConfig(sp[4]));
         }
         self.resolution = Resolution::from_config(sp[4]);
-        let raw = i16::from_le_bytes([sp[0], sp[1]]) & !self.resolution.undefined_bits();
+        let stale = self.resolution.conversion_time() > waited.conversion_time();
+        let undefined = if stale {
+            waited.undefined_bits() | self.resolution.undefined_bits()
+        } else {
+            self.resolution.undefined_bits()
+        };
+        let raw = i16::from_le_bytes([sp[0], sp[1]]) & !undefined;
 
         let mut ch = [Channel::default(); MAX_CHANNELS];
         ch[0] = Channel {
@@ -174,11 +186,14 @@ impl<W: OneWire> Ds18b20<W> {
             exp: -4,
             reserved: 0,
         };
-        let flags = if self.announce_epoch {
+        let mut flags = if self.announce_epoch {
             Flags::NEW_EPOCH
         } else {
             Flags::default()
         };
+        if stale {
+            flags = flags.union(Flags::STALE);
+        }
         let sample = Sample {
             timestamp: timestamp.as_nanos(),
             sensor_id: self.sensor_id,
@@ -266,6 +281,37 @@ mod tests {
         t.read(&clock).unwrap();
         let waited = clock.now().saturating_duration_since(before);
         assert!(waited >= Duration::from_micros(93_750) && waited < Duration::from_millis(100));
+    }
+
+    #[test]
+    fn a_resolution_raised_between_reads_marks_the_sample_stale() {
+        use std::cell::Cell;
+        use std::rc::Rc;
+
+        let config = Rc::new(Cell::new(0x1f_u8)); // 9-bit
+        let c = Rc::clone(&config);
+        let bus = FakeOneWire::with_device(Box::new(move |write, read| {
+            if write == [SKIP_ROM, READ_SCRATCHPAD] {
+                read.copy_from_slice(&scratchpad(0x0197, c.get()));
+            }
+            Ok(())
+        }));
+        let clock = FakeClock::new();
+        let mut t = Ds18b20::new(bus, 23, 1);
+
+        assert!(!t.read(&clock).unwrap().flags().contains(Flags::STALE));
+        // Someone sets 12 bits; this read waited only the 9-bit time.
+        config.set(0x7f);
+        let s = t.read(&clock).unwrap();
+        assert!(s.flags().contains(Flags::STALE));
+        assert_eq!(s.channels().unwrap()[0].raw, 0x0190, "masked at 9 bits");
+        // The next read waits the 12-bit time and is fresh.
+        let s = t.read(&clock).unwrap();
+        assert!(!s.flags().contains(Flags::STALE));
+        assert_eq!(s.channels().unwrap()[0].raw, 0x0197);
+        // Lowering the resolution only shortens the conversion: not stale.
+        config.set(0x1f);
+        assert!(!t.read(&clock).unwrap().flags().contains(Flags::STALE));
     }
 
     #[test]

@@ -70,6 +70,13 @@ impl<I: I2c> Pcf8591<I> {
 
     /// Converts AIN0 to AIN3. Each channel's raw value is the 8-bit code and
     /// its scaled value is millivolts: code * VREF / 256.
+    ///
+    /// The channels are not simultaneous. A conversion starts on the
+    /// acknowledge of the read address, so input n is converted during
+    /// transfer n, and the one timestamp is taken after the fourth. AIN0 is
+    /// therefore three transfers older than AIN3. A transfer is about 48 bit
+    /// times, so at 100 kHz that is at least 1.4 ms, plus the driver's
+    /// per-transfer overhead, which has not been measured.
     pub fn read<C: Clock>(&mut self, clock: &C) -> Result<Sample, Error> {
         let mut ch = [Channel::default(); MAX_CHANNELS];
         for (n, c) in ch.iter_mut().take(INPUTS).enumerate() {

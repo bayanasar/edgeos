@@ -164,6 +164,11 @@ pub trait Gpio {
 pub trait I2c {
     /// Writes `write` to the 7-bit address `addr`, then, if `read` is not
     /// empty, reads into it after a repeated start.
+    ///
+    /// Both empty is [`BusError::Invalid`]. An address-only probe would need
+    /// a zero-length message, which some adapters refuse, so the contract
+    /// does not offer one; answering `Ok` without touching the bus would
+    /// report a device that may not be there.
     fn transfer(
         &mut self,
         addr: u8,
