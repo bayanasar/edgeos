@@ -1,0 +1,11 @@
+[package]
+name = "sensor-fake"
+version = "0.1.0"
+description = "Fake clock and buses for testing sensor drivers without hardware"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+publish = false
+
+[dependencies]
+sensor-core = { path = "../core" }

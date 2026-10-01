@@ -1,0 +1,9 @@
+[package]
+name = "sensor-core"
+version = "0.1.0"
+description = "Bus primitives and fixed-layout sample records for portable sensor drivers"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
