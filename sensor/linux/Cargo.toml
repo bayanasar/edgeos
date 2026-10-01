@@ -13,3 +13,4 @@ sensor-core = { path = "../core" }
 sensor-bmp280 = { path = "../drivers/bmp280" }
 sensor-pcf8591 = { path = "../drivers/pcf8591" }
 sensor-ds18b20 = { path = "../drivers/ds18b20" }
+sensor-hcsr04 = { path = "../drivers/hcsr04" }

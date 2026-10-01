@@ -13,7 +13,7 @@
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::rc::Rc;
 use std::time::Duration;
 
@@ -253,8 +253,9 @@ pub struct FakeGpio {
     pub responder: Option<GpioResponder>,
     /// Every `set`, as (line, level, time in ns).
     pub log: Vec<(u32, bool, i64)>,
-    /// Returned by the next `wait_edges` instead of waiting.
-    pub fail_next: Option<BusError>,
+    /// Outcomes for the coming `wait_edges` calls, in order: `Some(e)` fails
+    /// that call with `e`, `None` lets it run.
+    pub outcomes: VecDeque<Option<BusError>>,
     waits: usize,
 }
 
@@ -266,7 +267,7 @@ impl FakeGpio {
             scheduled: Vec::new(),
             responder: None,
             log: Vec::new(),
-            fail_next: None,
+            outcomes: VecDeque::new(),
             waits: 0,
         }
     }
@@ -361,7 +362,7 @@ impl Gpio for FakeGpio {
         if out.is_empty() {
             return Err(BusError::Invalid);
         }
-        if let Some(e) = self.fail_next.take() {
+        if let Some(Some(e)) = self.outcomes.pop_front() {
             return Err(e);
         }
         self.waits += 1;
