@@ -420,6 +420,12 @@ mod tests {
         // Every corner of the trimming space, at both ends of the reading
         // range and of `t_fine`: each call returns without panicking, and any
         // value it returns is the exact one.
+        //
+        // One-sided on purpose. The checks are per step, so an input whose
+        // intermediate overflows 64 bits but whose result would fit returns
+        // `None` where the 128-bit reference has a value; `None` is only
+        // counted. Plain arithmetic passes the `Some` half of this test but
+        // panics on the corners, which is the regression it guards.
         let ends16 = [i16::MIN, i16::MAX];
         let mut none = 0;
         for &t1 in &[1, u16::MAX] {
