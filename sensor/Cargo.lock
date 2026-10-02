@@ -21,6 +21,14 @@ name = "sensor-core"
 version = "0.1.0"
 
 [[package]]
+name = "sensor-dht"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+ "sensor-fake",
+]
+
+[[package]]
 name = "sensor-ds18b20"
 version = "0.1.0"
 dependencies = [
@@ -58,6 +66,7 @@ dependencies = [
  "libc",
  "sensor-bmp280",
  "sensor-core",
+ "sensor-dht",
  "sensor-ds18b20",
  "sensor-encoder",
  "sensor-hcsr04",

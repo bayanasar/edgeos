@@ -4,8 +4,8 @@ Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
 Status: four drivers (BMP280, PCF8591, DS18B20, HC-SR04) verified on a
-Raspberry Pi 5 over Linux; the rotary encoder driver is tested against the
-fake bus only.
+Raspberry Pi 5 over Linux; the rotary encoder and DHT drivers are tested
+against the fake bus only.
 
 | Crate | What it is |
 |---|---|
@@ -15,8 +15,9 @@ fake bus only.
 | `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
 | `drivers/hcsr04` (`sensor-hcsr04`) | HC-SR04 ultrasonic ranging module, two GPIO lines |
 | `drivers/encoder` (`sensor-encoder`) | Incremental rotary encoder with push switch (KY-040 class), three GPIO lines |
+| `drivers/dht` (`sensor-dht`) | DHT11 and DHT22 (AM2302) humidity and temperature, one GPIO line |
 | `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus, GPIO lines with scheduled edges |
-| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read`, `encoder-read` tools |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read`, `encoder-read`, `dht-read` tools |
 
 ## `sensor-core`
 
@@ -79,6 +80,15 @@ a divider (for example 1 kOhm over 2 kOhm) before a 3.3 V input.
 at rest, since the resting levels define the detents. `--steps 2` or `1`
 suits encoders with two detents per quadrature cycle or none. Power the
 module from 3.3 V: its pull-ups go to its supply pin.
+
+`dht-read --model dht11 --line 25` reads a DHT11 every 2 s (`dht22` for a
+DHT22 or AM2302); the model must be named, since the two answer alike. The
+driver decodes from falling-edge timestamps alone, so its accuracy is the
+transport's: a failed read prints the frame it saw (edge count, delay to
+the first edge, the shortest and longest bit periods), and the tool ends
+with a tally of good and failed reads. Power the module from 3.3 V for the
+same reason as the encoder; the DHT11 V1.3 manual allows 3.3 to 5.5 V,
+earlier DHT11 manuals 3.5 to 5.5 V.
 
 ## Checks
 
