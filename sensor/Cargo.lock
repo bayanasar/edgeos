@@ -29,6 +29,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-encoder"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+ "sensor-fake",
+]
+
+[[package]]
 name = "sensor-fake"
 version = "0.1.0"
 dependencies = [
@@ -51,6 +59,7 @@ dependencies = [
  "sensor-bmp280",
  "sensor-core",
  "sensor-ds18b20",
+ "sensor-encoder",
  "sensor-hcsr04",
  "sensor-pcf8591",
 ]

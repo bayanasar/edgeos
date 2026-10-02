@@ -3,8 +3,8 @@
 Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
-Status: three drivers (BMP280, PCF8591, DS18B20) verified on a Raspberry Pi 5
-over Linux; the HC-SR04 driver and the GPIO transport are tested against the
+Status: four drivers (BMP280, PCF8591, DS18B20, HC-SR04) verified on a
+Raspberry Pi 5 over Linux; the rotary encoder driver is tested against the
 fake bus only.
 
 | Crate | What it is |
@@ -14,8 +14,9 @@ fake bus only.
 | `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
 | `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
 | `drivers/hcsr04` (`sensor-hcsr04`) | HC-SR04 ultrasonic ranging module, two GPIO lines |
+| `drivers/encoder` (`sensor-encoder`) | Incremental rotary encoder with push switch (KY-040 class), three GPIO lines |
 | `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus, GPIO lines with scheduled edges |
-| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read` tools |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read`, `encoder-read` tools |
 
 ## `sensor-core`
 
@@ -72,6 +73,12 @@ line offsets on the RP1 chip; `gpiodetect` and `gpioinfo` show which
 `/dev/gpiochipN` that is. `hcsr04-read --trig 23 --echo 24` uses BCM GPIO 23
 and 24. The common HC-SR04 runs at 5 V and drives ECHO at 5 V, so ECHO needs
 a divider (for example 1 kOhm over 2 kOhm) before a 3.3 V input.
+
+`encoder-read --clk 17 --dt 27 --sw 22` prints each detent (+1 clockwise,
+-1 counter-clockwise) and each press and release; start it with the shaft
+at rest, since the resting levels define the detents. `--steps 2` or `1`
+suits encoders with two detents per quadrature cycle or none. Power the
+module from 3.3 V: its pull-ups go to its supply pin.
 
 ## Checks
 
