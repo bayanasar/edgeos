@@ -1,0 +1,13 @@
+[package]
+name = "sensor-hcsr04"
+version = "0.1.0"
+description = "HC-SR04 ultrasonic ranging module driver over sensor-core"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sensor-core = { path = "../../core" }
+
+[dev-dependencies]
+sensor-fake = { path = "../../fake" }

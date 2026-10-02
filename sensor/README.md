@@ -3,7 +3,9 @@
 Portable sensor drivers in Rust, written once and run on Linux, as isolated
 seL4 components, and against a fake bus in tests.
 
-Status: three drivers (BMP280, PCF8591, DS18B20), verified on a Raspberry Pi 5 over Linux.
+Status: three drivers (BMP280, PCF8591, DS18B20) verified on a Raspberry Pi 5
+over Linux; the HC-SR04 driver and the GPIO transport are tested against the
+fake bus only.
 
 | Crate | What it is |
 |---|---|
@@ -11,8 +13,9 @@ Status: three drivers (BMP280, PCF8591, DS18B20), verified on a Raspberry Pi 5 o
 | `drivers/bmp280` (`sensor-bmp280`) | Bosch BMP280 pressure and temperature, I2C |
 | `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
 | `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
-| `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus |
-| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read` tools |
+| `drivers/hcsr04` (`sensor-hcsr04`) | HC-SR04 ultrasonic ranging module, two GPIO lines |
+| `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus, GPIO lines with scheduled edges |
+| `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read` tools |
 
 ## `sensor-core`
 
@@ -58,6 +61,15 @@ driver, not in the kernel's `w1_therm`. On the tested kernel this needs no
 root privileges. The DS18B20 must be externally powered (VCC connected);
 parasite power needs a strong pull-up the transport cannot give. `ds18b20-read --bus N` takes the master number of
 `w1_bus_masterN`.
+
+GPIO goes through the character device (`/dev/gpiochipN`, uAPI v2). Each
+configured line is its own line request; edges carry the kernel's interrupt
+timestamp on `CLOCK_MONOTONIC`, and a gap in a line's sequence number is
+reported as `Overflow`. On a Raspberry Pi 5 the header's GPIOs are line
+offsets on the RP1 chip; `gpiodetect` and `gpioinfo` show which
+`/dev/gpiochipN` that is. `hcsr04-read --trig 23 --echo 24` uses BCM GPIO 23
+and 24. The common HC-SR04 runs at 5 V and drives ECHO at 5 V, so ECHO needs
+a divider (for example 1 kOhm over 2 kOhm) before a 3.3 V input.
 
 ## Checks
 

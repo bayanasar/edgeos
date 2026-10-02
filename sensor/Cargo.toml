@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["core", "fake", "drivers/bmp280", "drivers/pcf8591", "drivers/ds18b20", "linux"]
+members = ["core", "fake", "drivers/bmp280", "drivers/pcf8591", "drivers/ds18b20", "drivers/hcsr04", "linux"]
 
 [workspace.package]
 edition = "2024"

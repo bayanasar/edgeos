@@ -1,18 +1,25 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! A fake clock and a fake I2C bus for driver tests.
+//! A fake clock and fake buses for driver tests.
 //!
 //! The I2C bus routes each transfer to a [`FakeDevice`] by address.
 //! [`RegisterDevice`] models the common register-pointer chip; a per-device
 //! hook sees every register write, so a test can model what the chip does in
 //! response (start a conversion, reset). Chips that behave differently
 //! implement [`FakeDevice`] themselves.
+//!
+//! [`FakeGpio`] shares the clock with the test: edges that a modelled device
+//! produces are scheduled on it and delivered when their time comes.
 
 #![forbid(unsafe_code)]
 
 use std::cell::Cell;
+use std::collections::{BTreeMap, VecDeque};
+use std::rc::Rc;
 use std::time::Duration;
 
-use sensor_core::bus::{BusError, Clock, I2c, Instant};
+use sensor_core::bus::{
+    BusError, Clock, Direction, Gpio, GpioEvent, I2c, Instant, LineConfig, TsSource,
+};
 
 /// A fake bus panics after this many transfers, so a driver that ignores its
 /// deadline fails its test instead of filling memory.
@@ -221,5 +228,259 @@ impl sensor_core::bus::OneWire for FakeOneWire {
         dev(write, read)?;
         self.log.push((write.to_vec(), read.len()));
         Ok(())
+    }
+}
+
+/// Called when a driver sets an output line, with the line, its new level and
+/// the time. Returns the edges the modelled device produces in response, as
+/// (line, level after the edge, delay from now).
+pub type GpioResponder = Box<dyn FnMut(u32, bool, Instant) -> Vec<(u32, bool, Duration)>>;
+
+/// One line of a [`FakeGpio`].
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct FakeLine {
+    pub config: LineConfig,
+    pub level: bool,
+}
+
+/// GPIO lines on one fake controller. A blocking wait is modelled by moving
+/// the shared clock forward to the next scheduled edge, or to the deadline.
+pub struct FakeGpio {
+    clock: Rc<FakeClock>,
+    pub lines: BTreeMap<u32, FakeLine>,
+    /// Edges not yet delivered: (time in ns, line, level after the edge).
+    scheduled: Vec<(i64, u32, bool)>,
+    pub responder: Option<GpioResponder>,
+    /// Every `set`, as (line, level, time in ns).
+    pub log: Vec<(u32, bool, i64)>,
+    /// Outcomes for the coming `wait_edges` calls, in order: `Some(e)` fails
+    /// that call with `e`, `None` lets it run.
+    pub outcomes: VecDeque<Option<BusError>>,
+    waits: usize,
+}
+
+impl FakeGpio {
+    pub fn new(clock: Rc<FakeClock>) -> Self {
+        FakeGpio {
+            clock,
+            lines: BTreeMap::new(),
+            scheduled: Vec::new(),
+            responder: None,
+            log: Vec::new(),
+            outcomes: VecDeque::new(),
+            waits: 0,
+        }
+    }
+
+    pub fn with_responder(clock: Rc<FakeClock>, responder: GpioResponder) -> Self {
+        FakeGpio {
+            responder: Some(responder),
+            ..Self::new(clock)
+        }
+    }
+
+    /// Schedules an edge `after` the current time, as an outside signal would.
+    pub fn schedule(&mut self, line: u32, level: bool, after: Duration) {
+        let at = self.clock.now().as_nanos() + after.as_nanos() as i64;
+        self.scheduled.push((at, line, level));
+        self.scheduled.sort_by_key(|e| e.0);
+    }
+
+    /// Removes the edges that are due and applies their levels. Returns those
+    /// that change a line's level and that the line is configured to report.
+    fn take_due(&mut self, out: &mut [GpioEvent]) -> usize {
+        let now = self.clock.now().as_nanos();
+        let mut n = 0;
+        while n < out.len() && self.scheduled.first().is_some_and(|e| e.0 <= now) {
+            let (at, line, level) = self.scheduled.remove(0);
+            let Some(l) = self.lines.get_mut(&line) else {
+                continue;
+            };
+            if l.level == level {
+                continue;
+            }
+            l.level = level;
+            let c = l.config;
+            let wanted = c.direction == Direction::Input
+                && ((level && c.edges.rising) || (!level && c.edges.falling));
+            if wanted {
+                out[n] = GpioEvent {
+                    timestamp: at,
+                    line,
+                    level: u8::from(level),
+                    ts_source: TsSource::Interrupt as u8,
+                    reserved: 0,
+                };
+                n += 1;
+            }
+        }
+        n
+    }
+}
+
+impl Gpio for FakeGpio {
+    fn configure(&mut self, line: u32, config: LineConfig) -> Result<(), BusError> {
+        let level = self.lines.get(&line).is_some_and(|l| l.level);
+        self.lines.insert(line, FakeLine { config, level });
+        Ok(())
+    }
+
+    fn set(&mut self, line: u32, high: bool) -> Result<(), BusError> {
+        let l = self.lines.get_mut(&line).ok_or(BusError::Invalid)?;
+        if l.config.direction != Direction::Output {
+            return Err(BusError::Invalid);
+        }
+        l.level = high;
+        let now = self.clock.now();
+        self.log.push((line, high, now.as_nanos()));
+        if let Some(r) = self.responder.as_mut() {
+            for (line, level, after) in r(line, high, now) {
+                self.scheduled
+                    .push((now.as_nanos() + after.as_nanos() as i64, line, level));
+            }
+            self.scheduled.sort_by_key(|e| e.0);
+        }
+        Ok(())
+    }
+
+    fn get(&mut self, line: u32) -> Result<bool, BusError> {
+        if !self.lines.contains_key(&line) {
+            return Err(BusError::Invalid);
+        }
+        // Apply due edges without consuming the ones a wait should report.
+        let now = self.clock.now().as_nanos();
+        let mut level = self.lines[&line].level;
+        for &(at, l, v) in &self.scheduled {
+            if at <= now && l == line {
+                level = v;
+            }
+        }
+        Ok(level)
+    }
+
+    fn wait_edges(&mut self, out: &mut [GpioEvent], deadline: Instant) -> Result<usize, BusError> {
+        if out.is_empty() {
+            return Err(BusError::Invalid);
+        }
+        if let Some(Some(e)) = self.outcomes.pop_front() {
+            return Err(e);
+        }
+        self.waits += 1;
+        assert!(
+            self.waits < RUNAWAY,
+            "runaway: {RUNAWAY} waits without stopping"
+        );
+        loop {
+            let n = self.take_due(out);
+            if n > 0 {
+                return Ok(n);
+            }
+            match self.scheduled.first() {
+                Some(&(at, _, _)) if at <= deadline.as_nanos() => {
+                    self.clock.sleep_until(Instant::from_nanos(at));
+                }
+                _ => {
+                    self.clock.sleep_until(deadline);
+                    return Err(BusError::Timeout);
+                }
+            }
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use sensor_core::bus::{Bias, Edges};
+
+    const IN_BOTH: LineConfig = LineConfig {
+        direction: Direction::Input,
+        bias: Bias::None,
+        edges: Edges::BOTH,
+    };
+    const OUT: LineConfig = LineConfig {
+        direction: Direction::Output,
+        bias: Bias::None,
+        edges: Edges::NONE,
+    };
+
+    fn at(clock: &FakeClock, d: Duration) -> Instant {
+        clock.now().checked_add(d).unwrap()
+    }
+
+    #[test]
+    fn a_wait_moves_the_clock_to_the_next_edge() {
+        let clock = Rc::new(FakeClock::new());
+        let mut g = FakeGpio::new(Rc::clone(&clock));
+        g.configure(4, IN_BOTH).unwrap();
+        g.schedule(4, true, Duration::from_micros(300));
+        let mut ev = [GpioEvent::default(); 4];
+        let n = g
+            .wait_edges(&mut ev, at(&clock, Duration::from_millis(1)))
+            .unwrap();
+        assert_eq!(n, 1);
+        assert_eq!((ev[0].line, ev[0].level, ev[0].timestamp), (4, 1, 300_000));
+        assert_eq!(clock.now().as_nanos(), 300_000);
+        assert!(g.get(4).unwrap());
+    }
+
+    #[test]
+    fn a_wait_past_the_last_edge_times_out_at_the_deadline() {
+        let clock = Rc::new(FakeClock::new());
+        let mut g = FakeGpio::new(Rc::clone(&clock));
+        g.configure(4, IN_BOTH).unwrap();
+        g.schedule(4, true, Duration::from_millis(5));
+        let mut ev = [GpioEvent::default(); 4];
+        let deadline = at(&clock, Duration::from_millis(1));
+        assert_eq!(g.wait_edges(&mut ev, deadline), Err(BusError::Timeout));
+        assert_eq!(clock.now(), deadline);
+    }
+
+    #[test]
+    fn unwanted_and_non_changing_edges_are_not_reported() {
+        let clock = Rc::new(FakeClock::new());
+        let mut g = FakeGpio::new(Rc::clone(&clock));
+        let rising_only = LineConfig {
+            edges: Edges::RISING,
+            ..IN_BOTH
+        };
+        g.configure(4, rising_only).unwrap();
+        g.schedule(4, false, Duration::from_micros(1)); // no change
+        g.schedule(4, true, Duration::from_micros(2));
+        g.schedule(4, false, Duration::from_micros(3)); // falling, not wanted
+        g.schedule(4, true, Duration::from_micros(4));
+        let mut ev = [GpioEvent::default(); 4];
+        let deadline = at(&clock, Duration::from_millis(1));
+        let mut seen = Vec::new();
+        while let Ok(n) = g.wait_edges(&mut ev, deadline) {
+            seen.extend(ev[..n].iter().map(|e| e.timestamp));
+        }
+        assert_eq!(seen, [2_000, 4_000]);
+    }
+
+    #[test]
+    fn a_responder_answers_an_output() {
+        let clock = Rc::new(FakeClock::new());
+        let mut g = FakeGpio::with_responder(
+            Rc::clone(&clock),
+            Box::new(|line, high, _| {
+                if line == 17 && !high {
+                    vec![(4, true, Duration::from_micros(10))]
+                } else {
+                    vec![]
+                }
+            }),
+        );
+        g.configure(17, OUT).unwrap();
+        g.configure(4, IN_BOTH).unwrap();
+        assert_eq!(g.set(4, true), Err(BusError::Invalid), "input line");
+        g.set(17, true).unwrap();
+        g.set(17, false).unwrap();
+        let mut ev = [GpioEvent::default(); 1];
+        assert_eq!(
+            g.wait_edges(&mut ev, at(&clock, Duration::from_millis(1))),
+            Ok(1)
+        );
+        assert_eq!(ev[0].timestamp, 10_000);
     }
 }

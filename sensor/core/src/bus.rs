@@ -131,7 +131,7 @@ pub struct LineConfig {
 
 /// One edge on a configured line. Fixed layout: a transport in another
 /// protection domain may deliver these through shared memory.
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 #[repr(C, align(8))]
 pub struct GpioEvent {
     /// [`Instant::as_nanos`] of the edge.

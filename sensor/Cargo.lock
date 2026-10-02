@@ -36,6 +36,14 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-hcsr04"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+ "sensor-fake",
+]
+
+[[package]]
 name = "sensor-linux"
 version = "0.1.0"
 dependencies = [
@@ -43,6 +51,7 @@ dependencies = [
  "sensor-bmp280",
  "sensor-core",
  "sensor-ds18b20",
+ "sensor-hcsr04",
  "sensor-pcf8591",
 ]
 
