@@ -2,7 +2,11 @@
 //! GPIO through the kernel's character device, uAPI v2 (`linux/gpio.h`).
 //!
 //! Each configured line is its own line request, so a line can be
-//! reconfigured without touching the others. Edge events carry the kernel's
+//! reconfigured without touching the others. Reconfiguring a line that is
+//! already requested changes it in place (`GPIO_V2_LINE_SET_CONFIG_IOCTL`):
+//! no release, so no window in which the line floats or another consumer can
+//! take it, and one system call for an output-to-input turnaround. A line
+//! switched to output drives low until it is set. Edge events carry the kernel's
 //! timestamp, taken when it handles the interrupt, on `CLOCK_MONOTONIC`: the
 //! same clock as [`MonotonicClock`]. A gap in a line's sequence number means
 //! the kernel dropped events because its buffer was full; that is reported as
@@ -35,7 +39,10 @@ const FLAG_BIAS_DISABLED: u64 = 1 << 10;
 const EVENT_RISING_EDGE: u32 = 1;
 
 /// Events the kernel buffers per line before it starts dropping the oldest.
-const EVENT_BUFFER: u32 = 64;
+/// A DHT frame is up to 85 edges (release, response, 40 bits, end), all of
+/// which arrive before the reader runs; the kernel's FIFO size is a power of
+/// two, so 128 is the first size that holds a frame.
+const EVENT_BUFFER: u32 = 128;
 const CONSUMER: &[u8] = b"sensor";
 
 // The kernel's structures. Every `__aligned_u64` member makes its structure
@@ -112,10 +119,12 @@ const fn iowr(nr: u32, size: usize) -> u32 {
 const GET_LINE_IOCTL: u32 = iowr(0x07, mem::size_of::<LineRequest>());
 const GET_VALUES_IOCTL: u32 = iowr(0x0E, mem::size_of::<LineValues>());
 const SET_VALUES_IOCTL: u32 = iowr(0x0F, mem::size_of::<LineValues>());
+const SET_CONFIG_IOCTL: u32 = iowr(0x0D, mem::size_of::<LineConfigRaw>());
 
 const _: () = assert!(GET_LINE_IOCTL == 0xC250_B407);
 const _: () = assert!(GET_VALUES_IOCTL == 0xC010_B40E);
 const _: () = assert!(SET_VALUES_IOCTL == 0xC010_B40F);
+const _: () = assert!(SET_CONFIG_IOCTL == 0xC110_B40D);
 
 const ZERO_ATTR: ConfigAttribute = ConfigAttribute {
     attr: LineAttribute {
@@ -125,6 +134,17 @@ const ZERO_ATTR: ConfigAttribute = ConfigAttribute {
     },
     mask: 0,
 };
+
+/// A line configuration with no per-line attributes: every requested line
+/// takes `flags`, and an output starts low.
+fn line_config(flags: u64) -> LineConfigRaw {
+    LineConfigRaw {
+        flags,
+        num_attrs: 0,
+        padding: [0; 5],
+        attrs: [ZERO_ATTR; NUM_ATTRS_MAX],
+    }
+}
 
 /// The request flags for a line configuration. Edges are only meaningful on
 /// an input.
@@ -201,12 +221,7 @@ impl LinuxGpio {
         let mut req = LineRequest {
             offsets,
             consumer,
-            config: LineConfigRaw {
-                flags,
-                num_attrs: 0,
-                padding: [0; 5],
-                attrs: [ZERO_ATTR; NUM_ATTRS_MAX],
-            },
+            config: line_config(flags),
             num_lines: 1,
             event_buffer_size: EVENT_BUFFER,
             padding: [0; 5],
@@ -237,8 +252,18 @@ impl LinuxGpio {
 impl Gpio for LinuxGpio {
     fn configure(&mut self, line: u32, config: LineConfig) -> Result<(), BusError> {
         let flags = line_flags(config)?;
-        // Release the line before requesting it again with the new flags.
-        self.lines.remove(&line);
+        if let Some(l) = self.lines.get_mut(&line) {
+            let mut c = line_config(flags);
+            // SAFETY: `c` is a complete gpio_v2_line_config the kernel reads.
+            let rc = unsafe { libc::ioctl(l.req.as_raw_fd(), SET_CONFIG_IOCTL as _, &mut c) };
+            if rc < 0 {
+                return Err(errno_to_bus(io::Error::last_os_error().raw_os_error()));
+            }
+            // The line keeps its request, its event FIFO and its sequence
+            // numbers, so `last_seqno` stays valid.
+            l.config = config;
+            return Ok(());
+        }
         let req = self.request(line, flags)?;
         self.lines.insert(
             line,

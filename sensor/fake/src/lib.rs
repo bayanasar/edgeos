@@ -236,11 +236,19 @@ impl sensor_core::bus::OneWire for FakeOneWire {
 /// (line, level after the edge, delay from now).
 pub type GpioResponder = Box<dyn FnMut(u32, bool, Instant) -> Vec<(u32, bool, Duration)>>;
 
+/// Called when a driver configures a line, with the line, its new
+/// configuration and the time. Returns edges as a [`GpioResponder`] does: a
+/// device that answers when the host releases a shared line uses this.
+pub type ConfigureHook = Box<dyn FnMut(u32, LineConfig, Instant) -> Vec<(u32, bool, Duration)>>;
+
 /// One line of a [`FakeGpio`].
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct FakeLine {
     pub config: LineConfig,
     pub level: bool,
+    /// Edges before this time (ns) change the level but are not reported:
+    /// edge detection was not armed yet.
+    pub armed_at: i64,
 }
 
 /// GPIO lines on one fake controller. A blocking wait is modelled by moving
@@ -251,6 +259,10 @@ pub struct FakeGpio {
     /// Edges not yet delivered: (time in ns, line, level after the edge).
     scheduled: Vec<(i64, u32, bool)>,
     pub responder: Option<GpioResponder>,
+    pub on_configure: Option<ConfigureHook>,
+    /// How long after `configure` a line starts reporting edges: the
+    /// transport's turnaround, which a real controller does not make zero.
+    pub arm_delay: Duration,
     /// Every `set`, as (line, level, time in ns).
     pub log: Vec<(u32, bool, i64)>,
     /// Outcomes for the coming `wait_edges` calls, in order: `Some(e)` fails
@@ -266,6 +278,8 @@ impl FakeGpio {
             lines: BTreeMap::new(),
             scheduled: Vec::new(),
             responder: None,
+            on_configure: None,
+            arm_delay: Duration::ZERO,
             log: Vec::new(),
             outcomes: VecDeque::new(),
             waits: 0,
@@ -302,6 +316,7 @@ impl FakeGpio {
             l.level = level;
             let c = l.config;
             let wanted = c.direction == Direction::Input
+                && at >= l.armed_at
                 && ((level && c.edges.rising) || (!level && c.edges.falling));
             if wanted {
                 out[n] = GpioEvent {
@@ -320,8 +335,24 @@ impl FakeGpio {
 
 impl Gpio for FakeGpio {
     fn configure(&mut self, line: u32, config: LineConfig) -> Result<(), BusError> {
+        let now = self.clock.now();
         let level = self.lines.get(&line).is_some_and(|l| l.level);
-        self.lines.insert(line, FakeLine { config, level });
+        let armed_at = now.as_nanos() + self.arm_delay.as_nanos() as i64;
+        self.lines.insert(
+            line,
+            FakeLine {
+                config,
+                level,
+                armed_at,
+            },
+        );
+        if let Some(h) = self.on_configure.as_mut() {
+            for (line, level, after) in h(line, config, now) {
+                self.scheduled
+                    .push((now.as_nanos() + after.as_nanos() as i64, line, level));
+            }
+            self.scheduled.sort_by_key(|e| e.0);
+        }
         Ok(())
     }
 
@@ -456,6 +487,49 @@ mod tests {
             seen.extend(ev[..n].iter().map(|e| e.timestamp));
         }
         assert_eq!(seen, [2_000, 4_000]);
+    }
+
+    #[test]
+    fn edges_before_the_turnaround_are_lost_but_still_move_the_level() {
+        // A device that answers the host's release of a shared line: the
+        // pull-up raises it at once, the device pulls it low 30 us later and
+        // lets it go 80 us after that.
+        let answer = |arm: Duration| {
+            let clock = Rc::new(FakeClock::new());
+            let mut g = FakeGpio::new(Rc::clone(&clock));
+            g.arm_delay = arm;
+            g.on_configure = Some(Box::new(|line, c, _| {
+                if c.direction == Direction::Input {
+                    vec![
+                        (line, true, Duration::ZERO),
+                        (line, false, Duration::from_micros(30)),
+                        (line, true, Duration::from_micros(110)),
+                    ]
+                } else {
+                    vec![]
+                }
+            }));
+            g.configure(4, OUT).unwrap();
+            g.set(4, false).unwrap();
+            g.configure(4, IN_BOTH).unwrap();
+            let mut ev = [GpioEvent::default(); 8];
+            let deadline = at(&clock, Duration::from_millis(1));
+            let mut seen = Vec::new();
+            while let Ok(n) = g.wait_edges(&mut ev, deadline) {
+                seen.extend(ev[..n].iter().map(|e| (e.timestamp, e.level)));
+            }
+            (seen, g.get(4).unwrap())
+        };
+        assert_eq!(
+            answer(Duration::ZERO),
+            (vec![(0, 1), (30_000, 0), (110_000, 1)], true)
+        );
+        // Armed 50 us late: the release and the device's falling edge are
+        // gone, only the rise at 110 us is seen, and the level is right.
+        assert_eq!(
+            answer(Duration::from_micros(50)),
+            (vec![(110_000, 1)], true)
+        );
     }
 
     #[test]
