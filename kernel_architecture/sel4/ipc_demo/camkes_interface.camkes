@@ -1,9 +1,0 @@
-component Sender {
-    control;
-}
-
-assembly {
-    composition {
-        component Sender sender;
-    }
-}
