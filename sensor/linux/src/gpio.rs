@@ -11,8 +11,16 @@
 //! same clock as [`MonotonicClock`]. A gap in a line's sequence number means
 //! the kernel dropped events because its buffer was full; that is reported as
 //! [`BusError::Overflow`].
+//!
+//! Each line has its own kernel queue, so a wait reads every ready queue
+//! whole and merges the events by timestamp before handing out the oldest;
+//! the rest are kept for the next call. Reading part of one queue could hand
+//! a line's later edges to the caller before another line's earlier ones,
+//! and a quadrature decoder would count those in the wrong direction. The
+//! kernel stamps an edge in its interrupt handler and queues it from a
+//! thread, so the order holds up to that thread's latency.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::fs::{File, OpenOptions};
 use std::io;
 use std::mem;
@@ -43,6 +51,9 @@ const EVENT_RISING_EDGE: u32 = 1;
 /// which arrive before the reader runs; the kernel's FIFO size is a power of
 /// two, so 128 is the first size that holds a frame.
 const EVENT_BUFFER: u32 = 128;
+// The kernel rounds its queue up to a power of two; one read of this many
+// events empties it only if no rounding happened.
+const _: () = assert!(EVENT_BUFFER.is_power_of_two());
 const CONSUMER: &[u8] = b"sensor";
 
 // The kernel's structures. Every `__aligned_u64` member makes its structure
@@ -196,11 +207,29 @@ impl Line {
     }
 }
 
+/// Adds events read from the kernel to `staged`, keeping it oldest first.
+/// The sort is stable, so a line's own events keep their queue order.
+fn stage(staged: &mut VecDeque<GpioEvent>, batch: &[GpioEvent]) {
+    staged.extend(batch);
+    staged.make_contiguous().sort_by_key(|e| e.timestamp);
+}
+
+/// Moves the oldest staged events into `out` and returns how many.
+fn deliver(staged: &mut VecDeque<GpioEvent>, out: &mut [GpioEvent]) -> usize {
+    let n = staged.len().min(out.len());
+    for (o, e) in out.iter_mut().zip(staged.drain(..n)) {
+        *o = e;
+    }
+    n
+}
+
 /// One GPIO controller, such as `/dev/gpiochip0`.
 pub struct LinuxGpio {
     chip: File,
     lines: BTreeMap<u32, Line>,
     clock: MonotonicClock,
+    /// Events read from the kernel and not yet handed out, oldest first.
+    staged: VecDeque<GpioEvent>,
 }
 
 impl LinuxGpio {
@@ -210,6 +239,7 @@ impl LinuxGpio {
             chip,
             lines: BTreeMap::new(),
             clock: MonotonicClock,
+            staged: VecDeque::new(),
         })
     }
 
@@ -308,7 +338,12 @@ impl Gpio for LinuxGpio {
             })
             .collect();
         loop {
-            let left = deadline.saturating_duration_since(self.clock.now());
+            // With events already staged, only collect what is ready now.
+            let left = if self.staged.is_empty() {
+                deadline.saturating_duration_since(self.clock.now())
+            } else {
+                std::time::Duration::ZERO
+            };
             let ts = libc::timespec {
                 tv_sec: left.as_secs() as _,
                 tv_nsec: left.subsec_nanos() as _,
@@ -323,30 +358,30 @@ impl Gpio for LinuxGpio {
                 }
                 return Err(errno_to_bus(err.raw_os_error()));
             }
-            if rc == 0 {
+            if rc == 0 && self.staged.is_empty() {
                 return Err(BusError::Timeout);
             }
             break;
         }
 
-        let mut n = 0;
         let mut lost = false;
+        let mut buf = [LineEvent::default(); EVENT_BUFFER as usize];
+        let mut batch = Vec::new();
         for (pfd, line) in fds.iter().zip(&watched) {
             if pfd.revents & (libc::POLLERR | libc::POLLHUP | libc::POLLNVAL) != 0 {
                 return Err(BusError::Io);
             }
-            if pfd.revents & libc::POLLIN == 0 || n == out.len() {
+            if pfd.revents & libc::POLLIN == 0 {
                 continue;
             }
-            let mut buf = [LineEvent::default(); 16];
-            let want = buf.len().min(out.len() - n);
             let l = self.lines.get_mut(line).expect("watched lines exist");
-            // SAFETY: reads at most `want` whole events into `buf`.
+            // SAFETY: reads at most `buf.len()` whole events into `buf`. The
+            // queue holds no more than that, so this one read empties it.
             let got = unsafe {
                 libc::read(
                     l.req.as_raw_fd(),
                     buf.as_mut_ptr().cast(),
-                    want * mem::size_of::<LineEvent>(),
+                    mem::size_of_val(&buf),
                 )
             };
             if got < 0 {
@@ -356,15 +391,17 @@ impl Gpio for LinuxGpio {
                 let (ev, gap) = convert(e, l.last_seqno);
                 l.last_seqno = e.line_seqno;
                 lost |= gap;
-                out[n] = ev;
-                n += 1;
+                batch.push(ev);
             }
         }
         if lost {
+            // The caller resynchronises from the lines' levels now, so
+            // nothing older may be handed out after this.
+            self.staged.clear();
             return Err(BusError::Overflow);
         }
-        out[..n].sort_by_key(|e| e.timestamp);
-        Ok(n)
+        stage(&mut self.staged, &batch);
+        Ok(deliver(&mut self.staged, out))
     }
 }
 
@@ -420,11 +457,44 @@ mod tests {
     }
 
     #[test]
+    fn edges_are_handed_out_oldest_first_across_lines() {
+        let ev = |line, t| GpioEvent {
+            timestamp: t,
+            line,
+            level: 1,
+            ts_source: TsSource::Interrupt as u8,
+            reserved: 0,
+        };
+        // Two lines' queues, read one after the other: line 5 in full, then
+        // line 6, whose edges interleave with line 5's.
+        let mut staged = VecDeque::new();
+        let first: Vec<_> = (0..20).map(|i| ev(5, 10 * i)).collect();
+        let second: Vec<_> = (0..20).map(|i| ev(6, 10 * i + 5)).collect();
+        stage(&mut staged, &first);
+        stage(&mut staged, &second);
+        let mut out = [GpioEvent::default(); 8];
+        let mut seen = Vec::new();
+        while !staged.is_empty() {
+            let n = deliver(&mut staged, &mut out);
+            seen.extend(out[..n].iter().map(|e| (e.line, e.timestamp)));
+        }
+        let want: Vec<_> = (0..40)
+            .map(|i| (5 + (i % 2) as u32, 5 * i as i64))
+            .collect();
+        assert_eq!(seen, want);
+        // Equal timestamps keep the order in which they were read.
+        stage(&mut staged, &[ev(6, 7), ev(5, 7)]);
+        assert_eq!(deliver(&mut staged, &mut out), 2);
+        assert_eq!((out[0].line, out[1].line), (6, 5));
+    }
+
+    #[test]
     fn waiting_needs_a_line_that_reports_edges() {
         let mut g = LinuxGpio {
             chip: File::open("/dev/null").unwrap(),
             lines: BTreeMap::new(),
             clock: MonotonicClock,
+            staged: VecDeque::new(),
         };
         let mut ev = [GpioEvent::default(); 1];
         assert_eq!(

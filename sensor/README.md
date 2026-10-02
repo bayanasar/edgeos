@@ -63,10 +63,12 @@ parasite power needs a strong pull-up the transport cannot give. `ds18b20-read -
 `w1_bus_masterN`.
 
 GPIO goes through the character device (`/dev/gpiochipN`, uAPI v2). Each
-configured line is its own line request; edges carry the kernel's interrupt
-timestamp on `CLOCK_MONOTONIC`, and a gap in a line's sequence number is
-reported as `Overflow`. On a Raspberry Pi 5 the header's GPIOs are line
-offsets on the RP1 chip; `gpiodetect` and `gpioinfo` show which
+configured line is its own line request, reconfigured in place; edges carry
+the kernel's interrupt timestamp on `CLOCK_MONOTONIC`, and a gap in a line's
+sequence number is reported as `Overflow`. Edges from several lines are
+handed out oldest first: each wait empties every ready line's kernel queue
+and merges them by timestamp. On a Raspberry Pi 5 the header's GPIOs are
+line offsets on the RP1 chip; `gpiodetect` and `gpioinfo` show which
 `/dev/gpiochipN` that is. `hcsr04-read --trig 23 --echo 24` uses BCM GPIO 23
 and 24. The common HC-SR04 runs at 5 V and drives ECHO at 5 V, so ECHO needs
 a divider (for example 1 kOhm over 2 kOhm) before a 3.3 V input.
