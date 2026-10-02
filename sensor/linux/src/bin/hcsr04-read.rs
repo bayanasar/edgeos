@@ -18,8 +18,8 @@ use sensor_linux::{LinuxGpio, MonotonicClock, decimal};
 const USAGE: &str = "usage: hcsr04-read [--chip PATH] [--trig N] [--echo N] [--temp-c N] \
                      [--count N] [--interval-ms N]";
 
-/// Not yet assigned a module number from the kit's manual.
-const SENSOR_ID: u32 = 0;
+/// The module's lesson number in the kit's manual.
+const SENSOR_ID: u32 = 35;
 
 struct Args {
     chip: String,
