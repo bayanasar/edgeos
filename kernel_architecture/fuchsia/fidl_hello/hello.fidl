@@ -1,5 +1,0 @@
-library fidl_hello;
-
-protocol Greeter {
-    Greet() -> (string message);
-};
