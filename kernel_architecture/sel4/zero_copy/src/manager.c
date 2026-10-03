@@ -7,7 +7,10 @@
  * grant copies a frame capability with the rights the client is to have
  * and maps the copy into the client's address space. Taking a buffer back
  * revokes the original capability, which deletes every copy and with it
- * every mapping.
+ * every mapping. The original is revocable because it came from
+ * Untyped_Retype; a copy of a frame capability is not (on RISC-V,
+ * Arch_isCapRevocable is false), so only the original's holder can take a
+ * buffer back.
  *
  * Step 1 checks one client alone. Step 2 adds a consumer and passes a
  * stream of buffers from producer to consumer through a ring. Every
@@ -134,7 +137,11 @@ static frame_t new_frame(seL4_Word bits)
     return f;
 }
 
-/* Maps a frame capability into a client, creating page tables as needed. */
+/*
+ * Maps a frame capability into a client, creating page tables as needed.
+ * The page tables are never freed: bounded here because addresses are reused,
+ * but a long-running manager would have to reclaim them.
+ */
 static int map_into(client_t *c, seL4_CPtr frame, seL4_Word va, seL4_CapRights_t rights)
 {
     for (int level = 0; level < 4; level++) {
@@ -239,6 +246,9 @@ static answer_t command(client_t *c, seL4_Word cmd, seL4_Word va, seL4_Word seq)
 /*
  * Completes a faulted access on the quarantine page: maps it where the
  * client faulted, resumes the client, and unmaps it once the client answers.
+ * This is the test harness's policy, so that one client can be probed many
+ * times. A real manager would stop or restart a client that faults, not hand
+ * it a writable page to finish the access.
  */
 static answer_t resume_on_quarantine(client_t *c, seL4_Word fault_addr)
 {
@@ -310,7 +320,20 @@ static void single_client(client_t *p, frame_t *buf)
     a = command(p, CMD_FILL, va, 2);
     check(!a.fault && a.sum == expected_sum(2), "the client refills the buffer (seq 2)");
 
+    /* A copy is not revocable: revoking one deletes nothing derived from it. */
+    cspacepath_t g2;
+    ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &g2), "slot");
+    ZF_LOGF_IF(vka_cnode_copy(&g2, &g, seL4_AllRights), "copy of the copy");
+    bool kept = vka_cnode_revoke(&g) == seL4_NoError
+                && seL4_RISCV_Page_GetAddress(g2.capPtr).error == seL4_NoError;
+    a = command(p, CMD_PROBE_READ, va, 0);
+    check(kept && !a.fault && a.sum == zc_pattern(2, 0),
+          "revoking the client's copy takes nothing back: its copy and mapping remain");
+
     check(take_back(buf, &g), "revoking the frame deletes the client's copy");
+    check(seL4_RISCV_Page_GetAddress(g2.capPtr).error != seL4_NoError,
+          "revoking the frame also deletes a copy of the copy");
+    vka_cspace_free_path(&vka, g2);
     check(refused(p, command(p, CMD_PROBE_WRITE, va, 0), va),
           "after revocation a write faults at the buffer, and completes on quarantine");
     check(refused(p, command(p, CMD_PROBE_READ, va, 0), va),
