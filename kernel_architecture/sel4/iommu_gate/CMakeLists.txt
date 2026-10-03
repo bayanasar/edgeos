@@ -31,7 +31,16 @@ sel4_import_libsel4()
 util_libs_import_libraries()
 sel4_libs_import_libraries()
 
-add_executable(iommu_gate src/main.c src/pci.c src/riscv_iommu.c src/edu.c)
+# The untrusted driver runs in its own address space; the root task, which
+# owns the IOMMU, loads it from a CPIO archive linked into its image.
+add_executable(gate_driver EXCLUDE_FROM_ALL src/driver.c src/edu.c)
+target_link_libraries(gate_driver PUBLIC sel4_autoconf muslc sel4 sel4runtime sel4muslcsys utils)
+target_compile_options(gate_driver PRIVATE -Wall -Werror)
+
+include(cpio)
+MakeCPIO(archive.o "$<TARGET_FILE:gate_driver>")
+
+add_executable(iommu_gate src/main.c src/pci.c src/riscv_iommu.c src/edu.c archive.o)
 target_link_libraries(
     iommu_gate
     PUBLIC

@@ -117,6 +117,8 @@ the invalidation itself, not merely the page-table edit.
   window, bus mastering, and 64-bit MSI capability programming.
 - `edu.c`: identification, DMA engine (a transfer can be started and left
   running) and interrupt trigger.
+- `driver.c`, `driver_protocol.h`: the untrusted driver process and its
+  messages to the owner.
 
 Whatever holds the IOMMU registers and tables decides what every device
 behind it can reach, so that code belongs to the trusted computing base.
@@ -129,8 +131,10 @@ behind it can reach, so that code belongs to the trusted computing base.
   `IOFENCE.C` wait or its PR/PW ordering is needed; only the `IOTINVAL.VMA`
   is shown to matter. Requests still in flight before the IOMMU would need
   an interconnect-level flush, which is not done.
-- One protection domain: the root task owns the IOMMU and also drives the
-  devices. A separate, untrusted driver component is not exercised.
+- Only the second device has an untrusted driver. The root task still drives
+  the first device itself in checks 1 to 25, and the driver follows the
+  owner's commands, so it shows what a hostile driver could reach, not how it
+  would choose its attempts.
 - A deadline abort is shown against a transfer that has not started. `edu`
   performs each transfer in one piece, so a transfer already in progress
   across the revoke, half before and half after, cannot be shown.
