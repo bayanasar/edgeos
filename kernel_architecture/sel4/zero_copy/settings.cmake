@@ -30,3 +30,5 @@ ApplyCommonSimulationSettings(${KernelSel4Arch})
 ApplyCommonReleaseVerificationSettings(FALSE FALSE)
 set(KernelMaxNumNodes 1 CACHE STRING "" FORCE)
 set(KernelIsMCS OFF CACHE BOOL "" FORCE)
+# Step 3 counts handoff costs from the kernel's log of its own entries.
+set(KernelBenchmarks "track_kernel_entries" CACHE STRING "" FORCE)

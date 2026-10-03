@@ -14,12 +14,18 @@
  * refusal is paired with the same access while granted, which must work,
  * and the refusals are made while another client holds the buffer.
  * Faulting accesses are completed on a quarantine page, never a buffer.
+ *
+ * Step 3 counts what a handoff costs, from the kernel's own log of its
+ * entries, against two baselines: a trusted copier, and one mapping shared
+ * for good with no enforcement.
  */
 #include <stdbool.h>
 #include <stdio.h>
+#include <string.h>
 
 #include <allocman/bootstrap.h>
 #include <allocman/vka.h>
+#include <sel4/benchmark_track_types.h>
 #include <sel4/sel4.h>
 #include <sel4platsupport/bootinfo.h>
 #include <sel4utils/process.h>
@@ -35,6 +41,13 @@
 #define BUF_LEN    BIT(seL4_PageBits)
 #define RING       4   /* buffers in the ring */
 #define HANDOFFS   32  /* producer-to-consumer handoffs through the ring */
+
+/* Step 3 uses the next two 2 MiB regions; clients reserve all three. */
+#define COST_VADDR  (BUF_VADDR + BIT(21))      /* buffers of 4 KiB frames */
+#define LARGE_VADDR (BUF_VADDR + 2 * BIT(21))  /* a buffer of one 2 MiB frame */
+#define CLIENT_RESERVED BIT(23)
+#define COST_HANDOFFS 8
+#define MAX_FRAMES 16
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 40)
 #define ALLOCATOR_VIRTUAL_POOL_SIZE (BIT(seL4_PageBits) * 400)
@@ -102,10 +115,10 @@ static seL4_Word slot_va(int slot)
     return BUF_VADDR + (seL4_Word)slot * BUF_LEN;
 }
 
-static frame_t new_frame(void)
+static frame_t new_frame(seL4_Word bits)
 {
     frame_t f;
-    ZF_LOGF_IF(vka_alloc_frame(&vka, seL4_PageBits, &f.frame), "frame");
+    ZF_LOGF_IF(vka_alloc_frame(&vka, bits, &f.frame), "frame");
     vka_cspace_make_path(&vka, f.frame.cptr, &f.cap);
     return f;
 }
@@ -132,13 +145,20 @@ static int map_into(client_t *c, seL4_CPtr frame, seL4_Word va, seL4_CapRights_t
     return -1;
 }
 
-/* Copies `f` with `rights` and maps the copy at `va` in client `c`. */
+/* Copies `f` with `rights` into the empty slot `copy` and maps it at `va` in client `c`. */
+static void grant_into(cspacepath_t *copy, frame_t *f, client_t *c, seL4_Word va,
+                       seL4_CapRights_t rights)
+{
+    ZF_LOGF_IF(vka_cnode_copy(copy, &f->cap, rights), "copy");
+    ZF_LOGF_IF(map_into(c, copy->capPtr, va, rights), "map grant");
+}
+
+/* As grant_into, in a new slot. */
 static cspacepath_t grant(frame_t *f, client_t *c, seL4_Word va, seL4_CapRights_t rights)
 {
     cspacepath_t copy;
     ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &copy), "slot");
-    ZF_LOGF_IF(vka_cnode_copy(&copy, &f->cap, rights), "copy");
-    ZF_LOGF_IF(map_into(c, copy.capPtr, va, rights), "map grant");
+    grant_into(&copy, f, c, va, rights);
     return copy;
 }
 
@@ -185,13 +205,18 @@ static answer_t wait_for(client_t *c)
 }
 
 /* Replies to the client's last call with a command and waits for its answer. */
-static answer_t command(client_t *c, seL4_Word cmd, seL4_Word va, seL4_Word seq)
+static answer_t command_len(client_t *c, seL4_Word cmd, seL4_Word va, size_t len, seL4_Word seq)
 {
     seL4_SetMR(0, va);
-    seL4_SetMR(1, BUF_LEN);
+    seL4_SetMR(1, len);
     seL4_SetMR(2, seq);
     seL4_Send(c->reply.capPtr, seL4_MessageInfo_new(cmd, 0, 0, 3));
     return wait_for(c);
+}
+
+static answer_t command(client_t *c, seL4_Word cmd, seL4_Word va, seL4_Word seq)
+{
+    return command_len(c, cmd, va, BUF_LEN, seq);
 }
 
 /*
@@ -219,13 +244,18 @@ static bool refused(client_t *c, answer_t a, seL4_Word va)
     return at_va && !r.fault && r.label == OP_DONE;
 }
 
-static uint32_t expected_sum(uint32_t seq)
+static uint32_t expected_sum_len(uint32_t seq, size_t len)
 {
     uint32_t h = ZC_FNV1A_INIT;
-    for (size_t i = 0; i < BUF_LEN; i++) {
+    for (size_t i = 0; i < len; i++) {
         h = zc_fnv1a_step(h, zc_pattern(seq, i));
     }
     return h;
+}
+
+static uint32_t expected_sum(uint32_t seq)
+{
+    return expected_sum_len(seq, BUF_LEN);
 }
 
 static void spawn(client_t *c)
@@ -237,9 +267,9 @@ static void spawn(client_t *c)
     seL4_CPtr ep_slot = sel4utils_copy_cap_to_process(&c->proc, &vka, c->ep);
     ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &c->reply), "reply slot");
 
-    /* Keep the client's own allocations out of the buffers' 2 MiB. */
-    reservation_t r = vspace_reserve_range_at(&c->proc.vspace, (void *)BUF_VADDR, BIT(21),
-                                              seL4_AllRights, 1);
+    /* Keep the client's own allocations out of the buffers' regions. */
+    reservation_t r = vspace_reserve_range_at(&c->proc.vspace, (void *)BUF_VADDR,
+                                              CLIENT_RESERVED, seL4_AllRights, 1);
     ZF_LOGF_IF(r.res == NULL, "reserve buffer range");
 
     char strings[1][WORD_STRING_SIZE];
@@ -341,18 +371,318 @@ static void producer_consumer(client_t *p, client_t *c, frame_t ring[RING])
     take_back(&ring[0], &gc);
 }
 
+/*
+ * Step 3: what a handoff costs, as the kernel logs it.
+ *
+ * Three schemes move the same buffer from producer to consumer:
+ * - enforced: the step 2 handoff, a grant and a revoke on each side;
+ * - copier: each client keeps a private buffer for good, and the manager
+ *   copies the producer's into the consumer's;
+ * - shared: one buffer mapped for good, read-write in the producer and
+ *   read-only in the consumer. Nothing stops the producer writing while the
+ *   consumer reads, so the consumer trusts the producer: a floor for the cost.
+ * The kernel logs every entry (KernelBenchmarks track_kernel_entries)
+ * between a log reset and a finalize; the manager counts the bytes it copies.
+ * QEMU's timing is not hardware timing, so only counts are reported.
+ *
+ * A grant reuses the slot its last revoke emptied, as a long-running manager
+ * would. Allocating and freeing a slot per grant would also log a
+ * seL4_DebugCapIdentify per free, which vka_cspace_free makes in debug builds.
+ */
+
+/* Cap types as the kernel logs them (include/arch/riscv/arch/64/mode/object/structures.bf). */
+enum { CAP_FRAME = 1, CAP_ENDPOINT = 4, CAP_REPLY = 8, CAP_CNODE = 10 };
+
+/* The kernel logs minus the syscall number. */
+#define SYS(n) ((seL4_Word)-(n))
+
+typedef enum { ENFORCED, COPIER, SHARED, SCHEMES } scheme_t;
+static const char *const scheme_name[SCHEMES] = { "enforced", "copier", "shared" };
+
+typedef struct {
+    int frames;
+    seL4_Word bits;
+    frame_t f[MAX_FRAMES];
+} buffer_t;
+
+typedef struct {
+    seL4_Word ipc;     /* calls and receives on endpoints, sends on reply caps */
+    seL4_Word save;    /* CNode_SaveCaller */
+    seL4_Word copy;    /* CNode_Copy */
+    seL4_Word map;     /* Page_Map */
+    seL4_Word revoke;  /* CNode_Revoke */
+    seL4_Word other;   /* any other system call */
+    seL4_Word reset;   /* benchmark and debug calls: only the reset that opens the window */
+    seL4_Word irq;     /* unlabelled entries: interrupts (see tally_entry) */
+    size_t copied;     /* bytes the manager copied */
+} tally_t;
+
+static benchmark_track_kernel_entry_t *kernel_log;
+
+static void log_init(void)
+{
+    kernel_log = vspace_new_pages(&vspace, seL4_AllRights, 1, seL4_LargePageBits);
+    ZF_LOGF_IF(kernel_log == NULL, "log buffer");
+    ZF_LOGF_IF(seL4_BenchmarkSetLogBuffer(vspace_get_cap(&vspace, kernel_log)) != seL4_NoError,
+               "set log buffer");
+}
+
+static void tally_entry(tally_t *t, kernel_entry_t e)
+{
+    /*
+     * The RISC-V kernel labels system calls only: its interrupt and exception
+     * entries set no path and are logged as Entry_Unknown (ARM and x86 label
+     * them). In a window these are timer interrupts, since a client fault
+     * would also reach the manager as a fault answer, which fails the run.
+     */
+    switch (e.path) {
+    case Entry_Syscall:
+        break;
+    case Entry_UnknownSyscall:
+        t->reset++;
+        return;
+    default:
+        t->irq++;
+        return;
+    }
+    seL4_Word sys = e.syscall_no;
+    if (e.cap_type == CAP_ENDPOINT && (sys == SYS(seL4_SysCall) || sys == SYS(seL4_SysRecv))) {
+        t->ipc++;
+    } else if (e.cap_type == CAP_REPLY && sys == SYS(seL4_SysSend)) {
+        t->ipc++;
+    } else if (e.cap_type == CAP_CNODE && sys == SYS(seL4_SysCall)
+               && e.invocation_tag == CNodeSaveCaller) {
+        t->save++;
+    } else if (e.cap_type == CAP_CNODE && sys == SYS(seL4_SysCall)
+               && e.invocation_tag == CNodeCopy) {
+        t->copy++;
+    } else if (e.cap_type == CAP_CNODE && sys == SYS(seL4_SysCall)
+               && e.invocation_tag == CNodeRevoke) {
+        t->revoke++;
+    } else if (e.cap_type == CAP_FRAME && sys == SYS(seL4_SysCall)
+               && e.invocation_tag == RISCVPageMap) {
+        t->map++;
+    } else {
+        t->other++;
+    }
+}
+
+static size_t buffer_len(const buffer_t *b)
+{
+    return (size_t)b->frames << b->bits;
+}
+
+static buffer_t new_buffer(int frames, seL4_Word bits)
+{
+    buffer_t b = { .frames = frames, .bits = bits };
+    for (int i = 0; i < frames; i++) {
+        b.f[i] = new_frame(bits);
+    }
+    return b;
+}
+
+/* Revokes every grant of `b` and frees its frames. */
+static void free_buffer(buffer_t *b)
+{
+    for (int i = 0; i < b->frames; i++) {
+        ZF_LOGF_IF(vka_cnode_revoke(&b->f[i].cap), "revoke");
+        vka_free_object(&vka, &b->f[i].frame);
+    }
+}
+
+/* Grants every frame of `b` to `c` from `va` on, into the empty slots `g`. */
+static void grant_buffer(buffer_t *b, client_t *c, seL4_Word va, seL4_CapRights_t rights,
+                         cspacepath_t g[])
+{
+    for (int i = 0; i < b->frames; i++) {
+        grant_into(&g[i], &b->f[i], c, va + ((seL4_Word)i << b->bits), rights);
+    }
+}
+
+/* Takes every frame of `b` back; the revokes empty the slots in `g` for reuse. */
+static void revoke_buffer(buffer_t *b)
+{
+    for (int i = 0; i < b->frames; i++) {
+        revoke(&b->f[i]);
+    }
+}
+
+static void alloc_paths(int n, cspacepath_t g[])
+{
+    for (int i = 0; i < n; i++) {
+        ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &g[i]), "slot");
+    }
+}
+
+/* Releases slots that a revoke has emptied. */
+static void free_paths(int n, cspacepath_t g[])
+{
+    for (int i = 0; i < n; i++) {
+        vka_cspace_free_path(&vka, g[i]);
+    }
+}
+
+/* For the copier: maps copies of `b`'s frames into the manager itself. */
+static uint8_t *map_into_manager(buffer_t *b, cspacepath_t g[])
+{
+    void *va;
+    seL4_CPtr caps[MAX_FRAMES];
+    reservation_t res = vspace_reserve_range_aligned(&vspace, buffer_len(b), b->bits,
+                                                     seL4_ReadWrite, 1, &va);
+    ZF_LOGF_IF(res.res == NULL, "manager range");
+    for (int i = 0; i < b->frames; i++) {
+        ZF_LOGF_IF(vka_cnode_copy(&g[i], &b->f[i].cap, seL4_ReadWrite), "copy");
+        caps[i] = g[i].capPtr;
+    }
+    ZF_LOGF_IF(vspace_map_pages_at_vaddr(&vspace, caps, NULL, va, b->frames, b->bits, res),
+               "map into manager");
+    return va;
+}
+
+/*
+ * The range stays reserved: a range that held 4 KiB frames keeps its page
+ * table, and a 2 MiB frame cannot be mapped over one.
+ */
+static void unmap_from_manager(buffer_t *b, uint8_t *va)
+{
+    vspace_unmap_pages(&vspace, va, b->frames, b->bits, VSPACE_PRESERVE);
+}
+
+/*
+ * Runs COST_HANDOFFS handoffs of one buffer under one scheme inside a log
+ * window, after one handoff outside it that creates any page tables the
+ * clients still lack. Sets `intact` if every consumer checksum equals the
+ * producer's and the expected pattern.
+ */
+static tally_t run(scheme_t s, client_t *p, client_t *c, int frames, seL4_Word bits, bool *intact)
+{
+    buffer_t buf = new_buffer(frames, bits), priv = { 0 };
+    size_t len = buffer_len(&buf);
+    seL4_Word va = bits == seL4_PageBits ? COST_VADDR : LARGE_VADDR;
+    cspacepath_t gp[MAX_FRAMES], gc[MAX_FRAMES], gm[MAX_FRAMES], gn[MAX_FRAMES];
+    uint8_t *from = NULL, *to = NULL;
+    answer_t made[COST_HANDOFFS + 1], seen[COST_HANDOFFS + 1];
+    tally_t t = { 0 };
+
+    alloc_paths(frames, gp);
+    alloc_paths(frames, gc);
+    if (s == COPIER) {
+        alloc_paths(frames, gm);
+        alloc_paths(frames, gn);
+        priv = new_buffer(frames, bits);
+        grant_buffer(&buf, p, va, seL4_ReadWrite, gp);
+        grant_buffer(&priv, c, va, seL4_CanRead, gc);
+        from = map_into_manager(&buf, gm);
+        to = map_into_manager(&priv, gn);
+    } else if (s == SHARED) {
+        grant_buffer(&buf, p, va, seL4_ReadWrite, gp);
+        grant_buffer(&buf, c, va, seL4_CanRead, gc);
+    }
+
+    for (uint32_t k = 0; k <= COST_HANDOFFS; k++) {
+        if (k == 1) {
+            seL4_BenchmarkResetLog();
+        }
+        if (s == ENFORCED) {
+            grant_buffer(&buf, p, va, seL4_ReadWrite, gp);
+        }
+        made[k] = command_len(p, CMD_FILL, va, len, 1000 + k);
+        if (s == ENFORCED) {
+            revoke_buffer(&buf);
+            grant_buffer(&buf, c, va, seL4_CanRead, gc);
+        } else if (s == COPIER) {
+            memcpy(to, from, len);
+            if (k > 0) {
+                t.copied += len;
+            }
+        }
+        seen[k] = command_len(c, CMD_CHECK, va, len, 1000 + k);
+        if (s == ENFORCED) {
+            revoke_buffer(&buf);
+        }
+    }
+    seL4_Word entries = seL4_BenchmarkFinalizeLog();
+
+    for (seL4_Word i = 0; i < entries; i++) {
+        tally_entry(&t, kernel_log[i].entry);
+    }
+    *intact = true;
+    for (uint32_t k = 0; k <= COST_HANDOFFS; k++) {
+        *intact = *intact && !made[k].fault && !seen[k].fault
+                  && made[k].sum == expected_sum_len(1000 + k, len) && seen[k].sum == made[k].sum;
+    }
+
+    if (s == COPIER) {
+        unmap_from_manager(&buf, from);
+        unmap_from_manager(&priv, to);
+        free_buffer(&priv);
+    }
+    free_buffer(&buf); /* its revokes empty every copy still held */
+    if (s == COPIER) {
+        free_paths(frames, gm);
+        free_paths(frames, gn);
+    }
+    free_paths(frames, gp);
+    free_paths(frames, gc);
+    return t;
+}
+
+static void cost(client_t *p, client_t *c)
+{
+    static const struct {
+        int frames;
+        seL4_Word bits;
+    } sizes[] = {
+        { 1, seL4_PageBits },
+        { MAX_FRAMES, seL4_PageBits },
+        { 1, seL4_LargePageBits },
+    };
+    const seL4_Word h = COST_HANDOFFS;
+    bool intact[SCHEMES] = { true, true, true };
+    bool clean = true, ipc = true, cap_ops = true, copied = true;
+
+    log_init();
+    for (scheme_t s = ENFORCED; s < SCHEMES; s++) {
+        for (size_t z = 0; z < ARRAY_SIZE(sizes); z++) {
+            bool ok;
+            tally_t t = run(s, p, c, sizes[z].frames, sizes[z].bits, &ok);
+            size_t len = (size_t)sizes[z].frames << sizes[z].bits;
+            seL4_Word ops = s == ENFORCED ? 2 * (seL4_Word)sizes[z].frames * h : 0;
+
+            printf("cost: %s, %zu bytes in %d frame(s), %lu handoffs: ipc %lu, save-caller %lu, "
+                   "copy %lu, map %lu, revoke %lu, other %lu, reset %lu, copied %zu bytes; "
+                   "%lu interrupts\n",
+                   scheme_name[s], len, sizes[z].frames, h, t.ipc, t.save, t.copy, t.map,
+                   t.revoke, t.other, t.reset, t.copied, t.irq);
+            intact[s] = intact[s] && ok;
+            clean = clean && t.other == 0 && t.reset == 1;
+            ipc = ipc && t.ipc == 6 * h && t.save == 2 * h;
+            cap_ops = cap_ops && t.copy == ops && t.map == ops && t.revoke == ops;
+            copied = copied && t.copied == (s == COPIER ? len * h : 0);
+        }
+    }
+    check(intact[ENFORCED], "enforced: every handoff arrives intact at 4 KiB, 64 KiB and 2 MiB");
+    check(intact[COPIER], "copier: every handoff arrives intact at every size");
+    check(intact[SHARED], "shared: every handoff arrives intact at every size");
+    check(clean, "interrupts aside, the kernel logged nothing the protocol does not account for");
+    check(ipc, "every scheme makes 3 IPC entries and 1 save-caller per command");
+    check(cap_ops,
+          "only the enforced scheme copies, maps and revokes: once per frame on each side");
+    check(copied, "only the copier copies data: the buffer's length per handoff");
+}
+
 int main(void)
 {
     bootstrap();
     printf("zero-copy: buffer manager on qemu-riscv-virt\n");
-    quarantine = new_frame();
+    quarantine = new_frame(seL4_PageBits);
 
     client_t producer, consumer;
     spawn(&producer);
     answer_t a = wait_for(&producer);
     check(!a.fault && a.label == OP_READY, "the producer starts in its own address space");
 
-    frame_t buf = new_frame();
+    frame_t buf = new_frame(seL4_PageBits);
     single_client(&producer, &buf);
 
     spawn(&consumer);
@@ -361,9 +691,10 @@ int main(void)
 
     frame_t ring[RING];
     for (int i = 0; i < RING; i++) {
-        ring[i] = new_frame();
+        ring[i] = new_frame(seL4_PageBits);
     }
     producer_consumer(&producer, &consumer, ring);
+    cost(&producer, &consumer);
 
     printf("Zero copy: %d/%d checks passed\n", checks_passed, checks_run);
     printf("ZERO_COPY: %s\n", checks_passed == checks_run ? "PASS" : "FAIL");

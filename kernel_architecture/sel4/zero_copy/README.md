@@ -1,6 +1,6 @@
 # Zero-copy buffer handoff on seL4
 
-Status: steps 1 and 2 of 4 — one client, then producer to consumer through a ring; 22/22 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-01
+Status: steps 1 to 3 of 4 — one client, producer to consumer through a ring, and the cost per handoff counted by the kernel; 29/29 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-02
 
 A buffer manager (the root task) lends frames to clients in their own address
 spaces and takes them back, so a producer's data reaches a consumer without
@@ -21,7 +21,8 @@ bash zero_copy.sh test /tmp/sel4-work
 The test saves the serial log to `logs/build-zero-copy-test.log` and passes
 only on the success marker, a non-empty summary with every check passed, and no
 `FAIL:` line. Overrides as for `iommu_gate.sh`. QEMU: `virt`, `rv64`, 1 hart,
-3072MiB, no devices.
+3072MiB, no devices. The kernel is built with `KernelBenchmarks` set to
+`track_kernel_entries` for step 3 (`settings.cmake`).
 
 ## How a handoff works
 
@@ -68,20 +69,82 @@ so a probe that could never succeed cannot pass as a refusal.
 | Consumer reads buffer 1, which it does not hold | faults |
 | Consumer writes the buffer it holds | faults |
 | Consumer reads buffer 0 again | intact after every refusal |
+| Step 3, each scheme at 4 KiB, 64 KiB and 2 MiB | every handoff arrives intact |
+| Kernel log of each window | nothing but the reset, the expected calls and interrupts |
+| IPC per command, every scheme | 3 IPC entries and 1 `SaveCaller` |
+| Capability operations | `Copy`, `Map` and `Revoke` once per frame on each side, enforced scheme only |
+| Bytes copied | the buffer's length per handoff, copier only |
 
 Mutants checked on 2026-10-01, each failing the run at the check aimed at
 it: skipping the revoke; mapping the read-only grant writable; resuming a
 faulted write on the buffer instead of the quarantine page; leaving the
 producer's mapping in place while the consumer holds the buffer; granting the
 consumer write access; giving the consumer a second buffer; and the consumer
-reading the wrong slot of the ring.
+reading the wrong slot of the ring. Step 3 mutants, checked on 2026-10-02: the
+copier skipping its copy; the copier copying half the buffer; an extra kernel
+call per revoke; the shared scheme without the consumer's mapping; no log
+reset before a window; and the enforced scheme not revoking the producer
+before granting the consumer.
+
+## Cost per handoff (step 3)
+
+Three schemes move the same buffer from producer to consumer, and the
+kernel's own log of its entries (`seL4_BenchmarkResetLog` to
+`seL4_BenchmarkFinalizeLog`) counts what each handoff costs. Eight handoffs
+per window, after one outside it that creates any page tables the clients
+still lack.
+
+- **Enforced:** the handoff above. A grant copies and maps each frame, and a
+  take-back revokes it, on each side.
+- **Copier:** each client keeps a private buffer for good, and the manager
+  copies the producer's into the consumer's. The parties stay isolated, but
+  the manager maps both buffers.
+- **Shared:** one buffer mapped for good, read-write in the producer and
+  read-only in the consumer. Nothing stops the producer writing while the
+  consumer reads, so the consumer must trust the producer to stop: a floor
+  for the cost, not an isolation scheme.
+
+Per handoff, the same at every run:
+
+| Scheme | Buffer | Kernel entries | of which IPC and `SaveCaller` | `Copy` / `Map` / `Revoke` | Bytes the manager copies |
+|---|---|---|---|---|---|
+| enforced | 4 KiB, one frame | 14 | 8 | 2 / 2 / 2 | 0 |
+| enforced | 64 KiB, 16 frames of 4 KiB | 104 | 8 | 32 / 32 / 32 | 0 |
+| enforced | 2 MiB, one frame of 2 MiB | 14 | 8 | 2 / 2 / 2 | 0 |
+| copier | 4 KiB, 64 KiB, 2 MiB | 8 | 8 | 0 | 4096, 65536, 2097152 |
+| shared | any | 8 | 8 | 0 | 0 |
+
+Every scheme pays the same two commands: per command, the manager's reply
+(`seL4_Send` on the saved reply capability), its `seL4_Recv` and
+`SaveCaller`, and the client's `seL4_Call`. On top of that, the enforced
+scheme pays six capability invocations per frame and copies nothing, and the
+copier pays no invocation and copies the whole buffer. The enforced cost
+follows the number of frames, not the bytes, so a 2 MiB buffer in one large
+frame costs what a 4 KiB one does.
+
+What the counts do not show: the work inside each invocation, above all the
+TLB flush when a revoke unmaps a frame, and a copy's cost in time. Which
+scheme is cheaper at a given size is a timing question for a board. The
+interrupts in a window are logged too, but they track how long the clients
+ran under QEMU, vary between runs, and are left out of the counts.
+
+Two things the kernel log taught:
+
+- On RISC-V the kernel labels only its system-call entries. Interrupt and
+  exception entries set no path and are logged as `Entry_Unknown`; ARM and x86
+  label them. A client fault in a window would still fail the run, because it
+  reaches the manager as a fault answer instead of `OP_DONE`.
+- In a debug build, `vka_cspace_free` checks the slot with
+  `seL4_DebugCapIdentify`, a kernel entry per free. The step 3 manager reuses
+  the slot each revoke empties instead of freeing and allocating one per
+  grant, as a long-running manager would.
 
 ## Not yet covered
 
 - Handoffs are sequential: the producer does not fill the next buffer while
   the consumer reads one.
-- Cost per handoff against a copy (step 3). QEMU's timing is not hardware
-  timing, so absolute costs need a real board.
+- Time per handoff. QEMU's timing is not hardware timing, so the step 3
+  counts need a board to become costs.
 - Revocation on a deadline when a client does not return the buffer (step 4).
 - Device DMA. This is a CPU-only path: no IOMMU invalidation or cache
   maintenance is involved, and a single hart means no cross-core TLB shootdown.
