@@ -21,6 +21,7 @@ enum {
     CMD_CHECK = 11,       /* checksum what is there */
     CMD_PROBE_WRITE = 12, /* write one byte at the address */
     CMD_PROBE_READ = 13,  /* read one byte at the address */
+    CMD_HOLD = 14,        /* keep reading the first byte; answer only once it changes */
 };
 
 /* The pattern a producer writes for a sequence number. */

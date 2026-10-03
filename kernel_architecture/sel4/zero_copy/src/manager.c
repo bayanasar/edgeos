@@ -18,6 +18,9 @@
  * Step 3 counts what a handoff costs, from the kernel's own log of its
  * entries, against two baselines: a trusted copier, and one mapping shared
  * for good with no enforcement.
+ *
+ * Step 4 gives a grant a deadline on a hardware timer and revokes on expiry,
+ * without the client's cooperation.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -25,9 +28,11 @@
 
 #include <allocman/bootstrap.h>
 #include <allocman/vka.h>
+#include <platsupport/io.h>
 #include <sel4/benchmark_track_types.h>
 #include <sel4/sel4.h>
 #include <sel4platsupport/bootinfo.h>
+#include <sel4platsupport/io.h>
 #include <sel4utils/process.h>
 #include <sel4utils/vspace.h>
 #include <simple-default/simple-default.h>
@@ -48,6 +53,12 @@
 #define CLIENT_RESERVED BIT(23)
 #define COST_HANDOFFS 8
 #define MAX_FRAMES 16
+
+/* Step 4: QEMU virt's goldfish RTC, a nanosecond counter with one alarm. */
+#define RTC_PADDR   0x101000
+#define RTC_IRQ     11
+#define TIMER_BADGE 1  /* client endpoints are unbadged */
+#define DEADLINE_NS 100000000ull
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 40)
 #define ALLOCATOR_VIRTUAL_POOL_SIZE (BIT(seL4_PageBits) * 400)
@@ -204,13 +215,19 @@ static answer_t wait_for(client_t *c)
     return a;
 }
 
-/* Replies to the client's last call with a command and waits for its answer. */
-static answer_t command_len(client_t *c, seL4_Word cmd, seL4_Word va, size_t len, seL4_Word seq)
+/* Replies to the client's last call with a command. */
+static void send_command(client_t *c, seL4_Word cmd, seL4_Word va, size_t len, seL4_Word seq)
 {
     seL4_SetMR(0, va);
     seL4_SetMR(1, len);
     seL4_SetMR(2, seq);
     seL4_Send(c->reply.capPtr, seL4_MessageInfo_new(cmd, 0, 0, 3));
+}
+
+/* Sends a command and waits for the client's answer. */
+static answer_t command_len(client_t *c, seL4_Word cmd, seL4_Word va, size_t len, seL4_Word seq)
+{
+    send_command(c, cmd, va, len, seq);
     return wait_for(c);
 }
 
@@ -671,6 +688,148 @@ static void cost(client_t *p, client_t *c)
     check(copied, "only the copier copies data: the buffer's length per handoff");
 }
 
+/*
+ * Step 4: a grant with a deadline.
+ *
+ * Every grant carries a deadline, and expiry takes the buffer back without
+ * the client's cooperation. For a CPU client the take-back is the revoke,
+ * which unmaps and returns the capability in one invocation; a device would
+ * also need its IOTLB synchronised and the cache maintained in between.
+ * The timer is QEMU virt's goldfish RTC: a nanosecond counter whose alarm
+ * raises interrupt 11, delivered to a notification bound to the manager, so
+ * a wait for a client also ends at the deadline.
+ */
+
+/* Goldfish RTC registers, as 32-bit word indices (QEMU hw/rtc/goldfish_rtc.c). */
+enum {
+    RTC_TIME_LOW = 0x00 / 4,
+    RTC_TIME_HIGH = 0x04 / 4,
+    RTC_ALARM_LOW = 0x08 / 4,
+    RTC_ALARM_HIGH = 0x0c / 4,
+    RTC_IRQ_ENABLED = 0x10 / 4,
+    RTC_CLEAR_ALARM = 0x14 / 4,
+    RTC_CLEAR_INTERRUPT = 0x1c / 4,
+};
+
+static volatile uint32_t *rtc;
+static seL4_CPtr timer_ntfn, timer_irq;
+
+static void timer_init(void)
+{
+    ps_io_ops_t io_ops;
+    ZF_LOGF_IF(sel4platsupport_new_io_ops(&vspace, &vka, &simple, &io_ops), "io ops");
+    rtc = ps_io_map(&io_ops.io_mapper, RTC_PADDR, BIT(seL4_PageBits), 0, PS_MEM_NORMAL);
+    ZF_LOGF_IF(rtc == NULL, "map RTC");
+
+    vka_object_t ntfn;
+    cspacepath_t ntfn_path, badged, irq;
+    ZF_LOGF_IF(vka_alloc_notification(&vka, &ntfn), "notification");
+    vka_cspace_make_path(&vka, ntfn.cptr, &ntfn_path);
+    ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &badged), "slot");
+    ZF_LOGF_IF(vka_cnode_mint(&badged, &ntfn_path, seL4_AllRights, TIMER_BADGE), "badge");
+    ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &irq), "slot");
+    ZF_LOGF_IF(seL4_IRQControl_Get(seL4_CapIRQControl, RTC_IRQ, irq.root, irq.capPtr, irq.capDepth),
+               "RTC interrupt");
+    ZF_LOGF_IF(seL4_IRQHandler_SetNotification(irq.capPtr, badged.capPtr), "RTC notification");
+    ZF_LOGF_IF(seL4_TCB_BindNotification(simple_get_tcb(&simple), ntfn.cptr), "bind");
+    timer_ntfn = ntfn.cptr;
+    timer_irq = irq.capPtr;
+    rtc[RTC_IRQ_ENABLED] = 1;
+}
+
+static uint64_t now_ns(void)
+{
+    uint64_t lo = rtc[RTC_TIME_LOW]; /* latches the high half */
+    return (uint64_t)rtc[RTC_TIME_HIGH] << 32 | lo;
+}
+
+/* Clears the alarm and any interrupt it raised, and drops a signal still pending. */
+static void disarm(void)
+{
+    rtc[RTC_CLEAR_ALARM] = 1;
+    rtc[RTC_CLEAR_INTERRUPT] = 1;
+    seL4_Word pending = 0;
+    seL4_Poll(timer_ntfn, &pending);
+    if (pending & TIMER_BADGE) {
+        seL4_IRQHandler_Ack(timer_irq);
+    }
+}
+
+/*
+ * Waits for client `c`'s next call or fault until `deadline`. Sets `expired`,
+ * and returns no answer, if the alarm comes first.
+ */
+static answer_t wait_until(client_t *c, uint64_t deadline, bool *expired)
+{
+    rtc[RTC_ALARM_HIGH] = deadline >> 32;
+    rtc[RTC_ALARM_LOW] = (uint32_t)deadline; /* arms the alarm */
+    seL4_Word badge;
+    seL4_MessageInfo_t info = seL4_Recv(c->ep, &badge);
+    *expired = badge & TIMER_BADGE;
+    if (*expired) {
+        rtc[RTC_CLEAR_INTERRUPT] = 1;
+        seL4_IRQHandler_Ack(timer_irq);
+        return (answer_t){ 0 };
+    }
+    answer_t a = decode(info); /* before any other system call overwrites the message */
+    ZF_LOGF_IF(vka_cnode_saveCaller(&c->reply), "save caller");
+    disarm();
+    return a;
+}
+
+/* Fills `buf` in the producer and leaves it with nobody. */
+static bool produce(client_t *p, frame_t *buf, seL4_Word va, uint32_t seq)
+{
+    cspacepath_t g = grant(buf, p, va, seL4_ReadWrite);
+    answer_t a = command(p, CMD_FILL, va, seq);
+    return take_back(buf, &g) && !a.fault && a.sum == expected_sum(seq);
+}
+
+static void deadlines(client_t *p, client_t *c)
+{
+    /*
+     * The quarantine page holds only zeros and the 0x5a of refused write
+     * probes, and CMD_HOLD answers once the byte it reads changes, so the
+     * buffer's first byte must be neither: zc_pattern(300, 0) is 0x54.
+     */
+    const uint32_t seq = 300;
+    seL4_Word va = slot_va(0);
+    frame_t buf = new_frame(seL4_PageBits);
+    bool expired, ok;
+    answer_t a;
+
+    timer_init();
+    ok = produce(p, &buf, va, seq);
+
+    cspacepath_t g = grant(&buf, c, va, seL4_CanRead);
+    send_command(c, CMD_CHECK, va, BUF_LEN, seq);
+    a = wait_until(c, now_ns() + DEADLINE_NS, &expired);
+    ok = take_back(&buf, &g) && ok;
+    check(ok && !expired && !a.fault && a.sum == expected_sum(seq),
+          "a consumer that answers before its deadline finishes normally");
+
+    g = grant(&buf, c, va, seL4_CanRead);
+    uint64_t deadline = now_ns() + DEADLINE_NS;
+    send_command(c, CMD_HOLD, va, BUF_LEN, seq);
+    a = wait_until(c, deadline, &expired);
+    uint64_t woke = now_ns();
+    check(expired && woke >= deadline,
+          "a consumer that holds the buffer is cut off at its deadline, not before");
+    check(take_back(&buf, &g), "the abort revokes without the consumer's answer: its copy is gone");
+    a = wait_until(c, now_ns() + DEADLINE_NS, &expired);
+    check(!expired && a.fault && a.fault_addr == va,
+          "the consumer, still reading, faults at the buffer once it is revoked");
+    answer_t r = expired ? (answer_t){ 0 } : resume_on_quarantine(c, a.fault_addr);
+    check(!r.fault && r.label == OP_DONE, "resumed on quarantine, the consumer answers again");
+
+    ok = produce(p, &buf, va, seq + 1);
+    g = grant(&buf, c, va, seL4_CanRead);
+    a = command(c, CMD_CHECK, va, seq + 1);
+    ok = take_back(&buf, &g) && ok;
+    check(ok && !a.fault && a.sum == expected_sum(seq + 1),
+          "after the abort the stream goes on: the next handoff arrives intact");
+}
+
 int main(void)
 {
     bootstrap();
@@ -695,6 +854,7 @@ int main(void)
     }
     producer_consumer(&producer, &consumer, ring);
     cost(&producer, &consumer);
+    deadlines(&producer, &consumer);
 
     printf("Zero copy: %d/%d checks passed\n", checks_passed, checks_run);
     printf("ZERO_COPY: %s\n", checks_passed == checks_run ? "PASS" : "FAIL");

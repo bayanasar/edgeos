@@ -41,6 +41,14 @@ int main(int argc, char **argv)
         case CMD_PROBE_READ:
             sum = buf[0];
             break;
+        case CMD_HOLD: {
+            /* A client that does not give the buffer back while it still sees the data. */
+            uint8_t first = buf[0], now;
+            while ((now = buf[0]) == first) {
+            }
+            sum = now;
+            break;
+        }
         default:
             break;
         }

@@ -1,6 +1,6 @@
 # Zero-copy buffer handoff on seL4
 
-Status: steps 1 to 3 of 4 — one client, producer to consumer through a ring, and the cost per handoff counted by the kernel; 29/29 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-02
+Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 35/35 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-02
 
 A buffer manager (the root task) lends frames to clients in their own address
 spaces and takes them back, so a producer's data reaches a consumer without
@@ -21,8 +21,11 @@ bash zero_copy.sh test /tmp/sel4-work
 The test saves the serial log to `logs/build-zero-copy-test.log` and passes
 only on the success marker, a non-empty summary with every check passed, and no
 `FAIL:` line. Overrides as for `iommu_gate.sh`. QEMU: `virt`, `rv64`, 1 hart,
-3072MiB, no devices. The kernel is built with `KernelBenchmarks` set to
-`track_kernel_entries` for step 3 (`settings.cmake`).
+3072MiB, no added devices; step 4 uses the machine's own goldfish RTC. The
+kernel is built with `KernelBenchmarks` set to `track_kernel_entries` for
+step 3 (`settings.cmake`). The log shows a kernel line "Attempted to invoke a
+null cap" each time a take-back checks that the client's slot is empty; those
+are expected.
 
 ## How a handoff works
 
@@ -74,6 +77,12 @@ so a probe that could never succeed cannot pass as a refusal.
 | IPC per command, every scheme | 3 IPC entries and 1 `SaveCaller` |
 | Capability operations | `Copy`, `Map` and `Revoke` once per frame on each side, enforced scheme only |
 | Bytes copied | the buffer's length per handoff, copier only |
+| Step 4: consumer answers within its deadline | normal answer, no abort |
+| Consumer holds the buffer (keeps reading, never answers) | the wait ends at the deadline, not before |
+| Abort | the revoke empties the consumer's slot without its answer |
+| The consumer, still reading | faults at the buffer address |
+| Resumed on quarantine | the consumer answers again |
+| Next handoff after the abort | arrives intact |
 
 Mutants checked on 2026-10-01, each failing the run at the check aimed at
 it: skipping the revoke; mapping the read-only grant writable; resuming a
@@ -84,7 +93,10 @@ reading the wrong slot of the ring. Step 3 mutants, checked on 2026-10-02: the
 copier skipping its copy; the copier copying half the buffer; an extra kernel
 call per revoke; the shared scheme without the consumer's mapping; no log
 reset before a window; and the enforced scheme not revoking the producer
-before granting the consumer.
+before granting the consumer. Step 4 mutants, checked on 2026-10-02: no
+revoke on expiry; a deadline of zero for the consumer that answers in time;
+and the alarm set before the deadline. Waiting for the holding consumer with
+no deadline at all hangs the manager, and the run fails on its timeout.
 
 ## Cost per handoff (step 3)
 
@@ -139,13 +151,35 @@ Two things the kernel log taught:
   the slot each revoke empties instead of freeing and allocating one per
   grant, as a long-running manager would.
 
+## Deadlines (step 4)
+
+Every grant carries a deadline, and expiry takes the buffer back without the
+client's cooperation. The timer is the `virt` machine's goldfish RTC at
+`0x101000`: a nanosecond counter whose alarm raises interrupt 11. The
+manager binds the interrupt's notification to its own thread, so its wait for
+a client's call or fault also ends when the alarm fires.
+
+- A consumer that answers within 100 ms finishes as usual, and the alarm is
+  cleared.
+- A consumer told to hold the buffer keeps reading it and never answers. At the
+  deadline the manager revokes the grant, as it would on a normal return.
+  The consumer's next read faults at the buffer, and it continues on the
+  quarantine page.
+- The producer's next buffer then reaches the consumer intact.
+
+For a CPU client, the revoke does all of the take-back: it unmaps the frame
+and returns the capability in one invocation. A device would need its IOTLB
+synchronised and its cache maintained between the unmap and the return.
+
 ## Not yet covered
 
 - Handoffs are sequential: the producer does not fill the next buffer while
   the consumer reads one.
 - Time per handoff. QEMU's timing is not hardware timing, so the step 3
   counts need a board to become costs.
-- Revocation on a deadline when a client does not return the buffer (step 4).
+- A deadline abort for a device that ignores the revoke, with IOTLB and cache
+  maintenance. The IOMMU gate is where that can be tested.
+- A board's timer: step 4 uses QEMU's goldfish RTC.
 - Device DMA. This is a CPU-only path: no IOMMU invalidation or cache
   maintenance is involved, and a single hart means no cross-core TLB shootdown.
 - Architectures other than RISC-V: the mapping calls are `seL4_RISCV_*`.
