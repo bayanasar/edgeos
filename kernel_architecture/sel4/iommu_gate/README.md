@@ -1,13 +1,14 @@
 # DMA isolation gate on QEMU RISC-V
 
-Status: 25/25 checks pass on QEMU 10.0.11; emulated IOMMU only, no hardware · Updated: 2026-10-03
+Status: 31/31 checks pass on QEMU 10.0.11; emulated IOMMU only, no hardware · Updated: 2026-10-03
 
 A seL4 root task that programs QEMU's RISC-V IOMMU (`riscv-iommu-pci`) and
 drives two QEMU `edu` devices as untrusted bus masters. It checks whether a
 device can read, write or deliver an interrupt outside what it was granted,
 whether it can reach the IOMMU's own structures, whether a revoked grant is
 really gone, and whether a grant's deadline takes the page back from a device
-that does not stop.
+that does not stop. The last checks give the second device to an untrusted
+driver in a process of its own, which holds no capability but its endpoint.
 
 ## Run
 
@@ -69,6 +70,12 @@ queue empty.
 | Abort: unmap, `IOTINVAL.VMA`, `IOFENCE.C` | done while the transfer is still pending |
 | The device's late write, after the page holds its next owner's data | refused, cause 15; the new data intact |
 | The same for a late read, then write-out to a mapped page | refused, cause 13; nothing of the new data copied |
+| Driver process started with the second device | it calls the owner from its own address space |
+| The driver lists every capability in its CSpace | exactly one: its endpoint |
+| The driver's device reads, then writes back, its grant | data arrives, no fault |
+| The driver's device writes its own context, the command queue and its page-table root | each refused, cause 15; unchanged |
+| The driver's device reads the owner's secret page, then writes it out | refused, cause 13; nothing copied |
+| The owner revokes the driver's grant without asking it; the driver's device writes | refused, cause 15; page unchanged |
 
 The first check runs before the directory exists. 00:02.0 then gets a
 domain (read-write, read-only and scratch pages); 00:03.0 has no context
@@ -79,6 +86,35 @@ already covers the class (no mapping, no access), but these are the targets
 that matter on silicon: a device that could rewrite its own context or page
 table could grant itself anything. The device's buffer holds a known pattern
 first, so a write that landed would show.
+
+## Owner and driver
+
+Whatever programs the IOMMU decides what every device can reach, so it
+belongs to the trusted computing base; a driver does not. In checks 26 to 31
+the root task keeps the IOMMU's registers, tables and all memory, and the
+second device goes to an untrusted driver, `src/driver.c`, loaded from a CPIO
+archive into an address space of its own. The driver commands its device as
+a hostile driver would: transfers to any bus address.
+
+- The owner maps the device's register page into the driver, but keeps the
+  frame capability behind the mapping. It deletes the CNode, VSpace and ASID
+  pool capabilities that sel4utils gives every process before the driver
+  runs, and its TCB capability once the driver has started: the driver's
+  runtime names its thread with that capability at startup. The driver then
+  lists its own CSpace with `seL4_DebugCapIdentify` and finds one
+  capability, its endpoint. With no untyped memory, frame or VSpace
+  capability it cannot map anything, the IOMMU's registers and tables
+  included.
+- Its device can use the grant the owner made, and nothing else: the
+  IOMMU's structures and the owner's memory are refused as they were for the
+  owner's own transfers.
+- The owner revokes the grant without asking the driver, and the driver's
+  next transfer is refused.
+
+Mutants checked on 2026-10-03, each failing at the check aimed at it: the
+IOMMU's register page given to the driver (it shows up in the driver's list
+at `0x40000000`); the ASID pool left in the driver's CSpace; the device's own
+context page mapped into its domain; and no revoke.
 
 ## Deadlines
 
@@ -117,6 +153,8 @@ the invalidation itself, not merely the page-table edit.
   window, bus mastering, and 64-bit MSI capability programming.
 - `edu.c`: identification, DMA engine (a transfer can be started and left
   running) and interrupt trigger.
+- `driver.c`, `driver_protocol.h`: the untrusted driver process and its
+  messages to the owner.
 
 Whatever holds the IOMMU registers and tables decides what every device
 behind it can reach, so that code belongs to the trusted computing base.
@@ -129,8 +167,10 @@ behind it can reach, so that code belongs to the trusted computing base.
   `IOFENCE.C` wait or its PR/PW ordering is needed; only the `IOTINVAL.VMA`
   is shown to matter. Requests still in flight before the IOMMU would need
   an interconnect-level flush, which is not done.
-- One protection domain: the root task owns the IOMMU and also drives the
-  devices. A separate, untrusted driver component is not exercised.
+- Only the second device has an untrusted driver. The root task still drives
+  the first device itself in checks 1 to 25, and the driver follows the
+  owner's commands, so it shows what a hostile driver could reach, not how it
+  would choose its attempts.
 - A deadline abort is shown against a transfer that has not started. `edu`
   performs each transfer in one piece, so a transfer already in progress
   across the revoke, half before and half after, cannot be shown.

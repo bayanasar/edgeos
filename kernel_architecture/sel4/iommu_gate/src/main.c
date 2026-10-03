@@ -4,9 +4,10 @@
  * One edu device (slot 2) is given three pages through the IOMMU. A
  * second edu device (slot 3) first has no context at all, then a domain
  * of its own. Each check drives a device transfer and judges it by the
- * target memory and the fault queue. The last checks aim the device at the
+ * target memory and the fault queue. Later checks aim the device at the
  * IOMMU's own structures, and give a grant a deadline that a slow device
- * misses.
+ * misses. The last ones hand the second device to an untrusted driver in a
+ * process of its own, which holds no capability but its endpoint.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -19,11 +20,14 @@
 #include <sel4platsupport/bootinfo.h>
 #include <sel4platsupport/io.h>
 #include <sel4utils/page_dma.h>
+#include <sel4utils/process.h>
 #include <sel4utils/vspace.h>
 #include <simple-default/simple-default.h>
 #include <utils/util.h>
 #include <utils/zf_log_if.h>
+#include <vka/capops.h>
 
+#include "driver_protocol.h"
 #include "edu.h"
 #include "pci.h"
 #include "riscv_iommu.h"
@@ -64,6 +68,8 @@
  * always missed and a 1 s one always met. */
 #define DEADLINE_SHORT_NS 20000000ull
 #define DEADLINE_LONG_NS  1000000000ull
+
+#define DRIVER_REGS_VA 0x2000000000ul /* the device's register page, in the driver */
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 40)
 #define ALLOCATOR_VIRTUAL_POOL_SIZE (BIT(seL4_PageBits) * 400)
@@ -228,6 +234,106 @@ static bool cannot_write(edu_t *e, uint32_t devid, const void *va, uintptr_t pa)
     memcpy(before, va, XFER);
     to_bus(e, 0, pa);
     return memcmp(before, va, XFER) == 0 && refused(IOMMU_CAUSE_WR_FAULT_S, devid, pa, pa + XFER);
+}
+
+typedef struct {
+    sel4utils_process_t proc;
+    seL4_CPtr ep;       /* its fault endpoint, also the one it calls */
+    cspacepath_t reply; /* saved reply capability for its last call */
+} driver_t;
+
+typedef struct {
+    seL4_Word label;
+    seL4_Word mr[1 + 3 * DRV_INVENTORY_MAX];
+} drv_answer_t;
+
+/* Maps a frame capability into a process, creating page tables as needed. */
+static int map_into(sel4utils_process_t *p, seL4_CPtr frame, seL4_Word va)
+{
+    for (int level = 0; level < 4; level++) {
+        int err = seL4_RISCV_Page_Map(frame, p->pd.cptr, va, seL4_ReadWrite,
+                                      seL4_RISCV_Default_VMAttributes);
+        if (err != seL4_FailedLookup) {
+            return err;
+        }
+        vka_object_t pt;
+        if (vka_alloc_page_table(&vka, &pt)) {
+            return -1;
+        }
+        err = seL4_RISCV_PageTable_Map(pt.cptr, p->pd.cptr, va, seL4_RISCV_Default_VMAttributes);
+        if (err) {
+            return err;
+        }
+    }
+    return -1;
+}
+
+/*
+ * Starts the driver with a mapping of `dev`'s register page. The frame
+ * capability behind the mapping stays with the owner, and the CNode, VSpace
+ * and ASID pool capabilities that sel4utils gives every process are deleted
+ * before it runs. Its TCB capability goes once it is running: its runtime
+ * names the thread with it at startup.
+ */
+static void spawn_driver(driver_t *d, edu_t *dev)
+{
+    sel4utils_process_config_t config = process_config_default_simple(&simple, "gate_driver",
+                                                                      seL4_MaxPrio - 1);
+    ZF_LOGF_IF(sel4utils_configure_process_custom(&d->proc, &vka, &vspace, config), "driver");
+    d->ep = d->proc.fault_endpoint.cptr;
+    ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &d->reply), "reply slot");
+
+    reservation_t r = vspace_reserve_range_at(&d->proc.vspace, (void *)DRIVER_REGS_VA,
+                                              BIT(seL4_PageBits), seL4_ReadWrite, 0);
+    ZF_LOGF_IF(r.res == NULL, "reserve registers");
+    cspacepath_t regs, copy;
+    vka_cspace_make_path(&vka, vspace_get_cap(&vspace, (void *)dev->regs), &regs);
+    ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &copy), "slot");
+    ZF_LOGF_IF(vka_cnode_copy(&copy, &regs, seL4_ReadWrite), "copy registers");
+    ZF_LOGF_IF(map_into(&d->proc, copy.capPtr, DRIVER_REGS_VA), "map registers");
+
+    const seL4_CPtr drop[] = { SEL4UTILS_CNODE_SLOT, SEL4UTILS_PD_SLOT, SEL4UTILS_ASID_POOL_SLOT };
+    for (size_t i = 0; i < ARRAY_SIZE(drop); i++) {
+        ZF_LOGF_IF(seL4_CNode_Delete(d->proc.cspace.cptr, drop[i], d->proc.cspace_size), "drop");
+    }
+
+    char strings[3][WORD_STRING_SIZE];
+    char *argv[3];
+    sel4utils_create_word_args(strings, argv, 3, (seL4_Word)SEL4UTILS_ENDPOINT_SLOT,
+                               (seL4_Word)DRIVER_REGS_VA, (seL4_Word)d->proc.cspace_size);
+    ZF_LOGF_IF(sel4utils_spawn_process_v(&d->proc, &vka, &vspace, 3, argv, 1), "spawn driver");
+}
+
+/* Waits for the driver's next call, copying its message before any other system call. */
+static drv_answer_t driver_wait(driver_t *d)
+{
+    seL4_Word badge;
+    seL4_MessageInfo_t info = seL4_Recv(d->ep, &badge);
+    drv_answer_t a = { .label = seL4_MessageInfo_get_label(info) };
+    for (seL4_Word i = 0; i < seL4_MessageInfo_get_length(info) && i < ARRAY_SIZE(a.mr); i++) {
+        a.mr[i] = seL4_GetMR(i);
+    }
+    ZF_LOGF_IF(vka_cnode_saveCaller(&d->reply), "save caller");
+    return a;
+}
+
+static drv_answer_t driver_command(driver_t *d, seL4_Word cmd, seL4_Word a, seL4_Word b, seL4_Word len)
+{
+    seL4_SetMR(0, a);
+    seL4_SetMR(1, b);
+    seL4_SetMR(2, len);
+    seL4_Send(d->reply.capPtr, seL4_MessageInfo_new(cmd, 0, 0, 3));
+    return driver_wait(d);
+}
+
+/* The driver's device aimed at one of the IOMMU's structures: refused, and the structure unchanged. */
+static bool driver_cannot_write(driver_t *d, uint32_t devid, const void *va, uintptr_t pa)
+{
+    uint8_t before[XFER];
+    memcpy(before, va, XFER);
+    drv_answer_t r = driver_command(d, DRV_TO_BUS, 0, pa, XFER);
+    return r.label == DRV_DONE && r.mr[0] == 0 && memcmp(before, va, XFER) == 0 &&
+           refused(IOMMU_CAUSE_WR_FAULT_S, devid, pa, pa + XFER);
 }
 
 static pci_dev_t *find(pci_dev_t *devs, int n, uint16_t vendor, uint16_t device, int slot)
@@ -496,6 +602,59 @@ int main(void)
     to_bus(&dev_a, 512, IOVA_SCRATCH);
     check(late && pending && denied && !holds(scratch.va, 0xab) && no_fault(),
           "the device's late read is refused: nothing of the next owner's data leaks");
+
+    /* 26-31. The owner/driver split. The root task keeps the IOMMU's
+     * registers and tables; the second device goes to an untrusted driver in
+     * its own address space, which commands it as a hostile driver would. */
+    driver_t drv;
+    spawn_driver(&drv, &dev_b);
+    drv_answer_t r = driver_wait(&drv);
+    check(r.label == DRV_READY, "the driver starts in its own address space");
+    ZF_LOGF_IF(seL4_CNode_Delete(drv.proc.cspace.cptr, SEL4UTILS_TCB_SLOT, drv.proc.cspace_size),
+               "drop TCB");
+
+    r = driver_command(&drv, DRV_INVENTORY, 0, 0, 0);
+    for (seL4_Word i = 0; i < r.mr[0] && i < DRV_INVENTORY_MAX; i++) {
+        printf("  driver slot %lu: cap type %lu, address %#lx\n", (unsigned long)r.mr[1 + 3 * i],
+               (unsigned long)r.mr[2 + 3 * i], (unsigned long)r.mr[3 + 3 * i]);
+    }
+    check(r.label == DRV_DONE && r.mr[0] == 1 && r.mr[1] == SEL4UTILS_ENDPOINT_SLOT &&
+          r.mr[2] == CAP_TYPE_ENDPOINT,
+          "the driver holds only its endpoint: no memory, frame, VSpace or IOMMU capability");
+
+    fill(own_b.va, 0x55);
+    r = driver_command(&drv, DRV_FROM_BUS, IOVA_GRANT, 0, XFER);
+    bool moved = r.label == DRV_DONE && r.mr[0] == 0;
+    memset(own_b.va, 0, XFER);
+    r = driver_command(&drv, DRV_TO_BUS, 0, IOVA_GRANT, XFER);
+    check(moved && r.mr[0] == 0 && holds(own_b.va, 0x55) && no_fault(),
+          "the driver's device reads and writes its grant");
+
+    uintptr_t dcb_pa;
+    uint64_t *dcb = riscv_iommu_dc(&iommu, devid_b, &dcb_pa);
+    bool kept = driver_cannot_write(&drv, devid_b, dcb, dcb_pa);
+    kept = driver_cannot_write(&drv, devid_b, iommu.cq, iommu.cq_pa) && kept;
+    kept = driver_cannot_write(&drv, devid_b, dom_b.table_va[0], dom_b.table_pa[0]) && kept;
+    check(kept, "the driver's device cannot write its context, the command queue or its page table");
+
+    r = driver_command(&drv, DRV_FROM_BUS, secret.pa, 1024, XFER);
+    denied = refused(IOMMU_CAUSE_RD_FAULT_S, devid_b, secret.pa, secret.pa + XFER);
+    memset(own_b.va, 0, XFER);
+    driver_command(&drv, DRV_TO_BUS, 1024, IOVA_GRANT, XFER);
+    check(denied && !holds(own_b.va, 0x5e) && no_fault(),
+          "the driver's device cannot read the owner's memory");
+
+    /* The owner revokes the grant without asking the driver. */
+    ZF_LOGF_IF(iommu_unmap(&dom_b, IOVA_GRANT, true), "revoke driver grant");
+    memset(own_b.va, 0, XFER);
+    r = driver_command(&drv, DRV_TO_BUS, 0, IOVA_GRANT, XFER);
+    untouched = true;
+    for (int i = 0; i < XFER; i++) {
+        untouched &= own_b.va[i] == 0;
+    }
+    check(r.label == DRV_DONE && untouched &&
+          refused(IOMMU_CAUSE_WR_FAULT_S, devid_b, IOVA_GRANT, IOVA_GRANT + XFER),
+          "after the owner revokes the grant, the driver's device is refused");
 
     printf("IOMMU gate: %d/%d checks passed\n", checks_passed, checks_run);
     printf("IOMMU_GATE: %s\n", checks_run > 0 && checks_passed == checks_run ? "PASS" : "FAIL");
