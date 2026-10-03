@@ -4,7 +4,7 @@ Status: QEMU RV64 baseline tested; hardware profiles build-only.
 
 `sel4test.sh` prepares a pinned upstream seL4test tree, builds it in a pinned
 seL4 container, and runs the upstream suite in QEMU. It does not implement a
-new kernel or repair the separate `ipc_demo` stub.
+new kernel.
 
 Requirements: Bash, Git, Docker, and the upstream `repo` launcher. Python and
 pexpect run inside the container. Run from this directory:
