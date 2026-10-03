@@ -22,6 +22,16 @@ int edu_dma_to_bus(edu_t *e, uint32_t buf_off, uint64_t addr, uint32_t len);
 /* Bus address -> device buffer (a device read). */
 int edu_dma_from_bus(edu_t *e, uint64_t addr, uint32_t buf_off, uint32_t len);
 
+/*
+ * The same transfers, started and left running. QEMU's edu performs a
+ * transfer in one piece about 100 ms (virtual clock) after the command,
+ * whatever happens meanwhile: a device that ignores a revoke.
+ */
+int edu_start_to_bus(edu_t *e, uint32_t buf_off, uint64_t addr, uint32_t len);
+int edu_start_from_bus(edu_t *e, uint64_t addr, uint32_t buf_off, uint32_t len);
+int edu_dma_busy(edu_t *e);
+int edu_dma_wait(edu_t *e);
+
 /* Raise and acknowledge the device interrupt. With MSI enabled, raising
  * makes the device write its MSI message to the bus. */
 void edu_raise_irq(edu_t *e);

@@ -21,6 +21,7 @@ typedef struct {
     uint64_t *ddt;                 /* one-level device directory */
     uintptr_t ddt_pa;
     uint64_t *cq;                  /* command queue */
+    uintptr_t cq_pa;
     uint32_t cq_tail;
     uint32_t cq_mask;
     uint64_t *fq;                  /* fault queue */
@@ -85,6 +86,9 @@ int iommu_unmap(iommu_domain_t *d, uint64_t iova, bool invalidate);
 
 /* Invalidate one page of the domain's IOTLB entries and wait. */
 int iommu_flush(iommu_domain_t *d, uint64_t iova);
+
+/* The device context of devid in the directory, and its physical address. */
+uint64_t *riscv_iommu_dc(riscv_iommu_t *m, uint32_t devid, uintptr_t *pa);
 
 /* Returns 1 and fills f if a fault record was pending, 0 if none, -1 on
  * queue overflow or memory fault. */

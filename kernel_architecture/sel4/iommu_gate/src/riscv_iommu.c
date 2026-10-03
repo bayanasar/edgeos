@@ -195,6 +195,7 @@ int riscv_iommu_init(riscv_iommu_t *m, void *regs, ps_dma_man_t *dma)
     uintptr_t cq_pa, fq_pa, fence_pa;
     m->ddt = alloc_page(m, &m->ddt_pa);
     m->cq = alloc_page(m, &cq_pa);
+    m->cq_pa = cq_pa;
     m->fq = alloc_page(m, &fq_pa);
     m->fence_word = alloc_page(m, &fence_pa);
     if (!m->ddt || !m->cq || !m->fq || !m->fence_word) {
@@ -399,6 +400,13 @@ int iommu_unmap(iommu_domain_t *d, uint64_t iova, bool invalidate)
 int iommu_flush(iommu_domain_t *d, uint64_t iova)
 {
     return iotlb_invalidate(d, iova, false);
+}
+
+uint64_t *riscv_iommu_dc(riscv_iommu_t *m, uint32_t devid, uintptr_t *pa)
+{
+    size_t off = (size_t)devid * dc_words(m) * sizeof(uint64_t);
+    *pa = m->ddt_pa + off;
+    return (uint64_t *)((uint8_t *)m->ddt + off);
 }
 
 int riscv_iommu_pop_fault(riscv_iommu_t *m, iommu_fault_t *f)

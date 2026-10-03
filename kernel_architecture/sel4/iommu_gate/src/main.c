@@ -4,7 +4,9 @@
  * One edu device (slot 2) is given three pages through the IOMMU. A
  * second edu device (slot 3) first has no context at all, then a domain
  * of its own. Each check drives a device transfer and judges it by the
- * target memory and the fault queue.
+ * target memory and the fault queue. The last checks aim the device at the
+ * IOMMU's own structures, and give a grant a deadline that a slow device
+ * misses.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -48,10 +50,20 @@
 #define IOVA_RO      0x00101000ull  /* read-only */
 #define IOVA_SCRATCH 0x00102000ull  /* read-write, collects exfiltration attempts */
 #define IOVA_UNMAPPED 0x00103000ull
+#define IOVA_LEASE   0x00104000ull  /* read-write, granted with a deadline */
 #define IOVA_MSI     0x00200000ull  /* two pages onto MSI interrupt files 0 and 1 */
 #define PSCID_A      1
 #define PSCID_B      2
 #define XFER         64    /* bytes; keeps refused transfers well inside the fault queue */
+
+/* QEMU virt's goldfish RTC, a nanosecond counter (hw/riscv/virt.c, hw/rtc/goldfish_rtc.c). */
+#define RTC_PADDR    0x101000ul
+#define RTC_TIME_LOW  (0x00 / 4)
+#define RTC_TIME_HIGH (0x04 / 4)
+/* edu starts a transfer 100 ms after its command, so a 20 ms deadline is
+ * always missed and a 1 s one always met. */
+#define DEADLINE_SHORT_NS 20000000ull
+#define DEADLINE_LONG_NS  1000000000ull
 
 #define ALLOCATOR_STATIC_POOL_SIZE (BIT(seL4_PageBits) * 40)
 #define ALLOCATOR_VIRTUAL_POOL_SIZE (BIT(seL4_PageBits) * 400)
@@ -65,6 +77,7 @@ static ps_io_ops_t io_ops;
 static ps_dma_man_t dma_man;
 
 static riscv_iommu_t iommu;
+static volatile uint32_t *rtc;
 static int checks_run, checks_passed;
 
 typedef struct {
@@ -189,6 +202,32 @@ static void to_bus(edu_t *e, uint32_t off, uint64_t addr)
 static void from_bus(edu_t *e, uint64_t addr, uint32_t off)
 {
     ZF_LOGF_IF(edu_dma_from_bus(e, addr, off, XFER), "edu DMA timed out");
+}
+
+static uint64_t now_ns(void)
+{
+    uint64_t lo = rtc[RTC_TIME_LOW]; /* latches the high half */
+    return (uint64_t)rtc[RTC_TIME_HIGH] << 32 | lo;
+}
+
+/* Waits for the device's transfer until the deadline; false if it is still running then. */
+static bool done_by(edu_t *e, uint64_t deadline)
+{
+    while (edu_dma_busy(e)) {
+        if (now_ns() >= deadline) {
+            return false;
+        }
+    }
+    return true;
+}
+
+/* A device write aimed at one of the IOMMU's own structures: refused, and the structure unchanged. */
+static bool cannot_write(edu_t *e, uint32_t devid, const void *va, uintptr_t pa)
+{
+    uint8_t before[XFER];
+    memcpy(before, va, XFER);
+    to_bus(e, 0, pa);
+    return memcmp(before, va, XFER) == 0 && refused(IOMMU_CAUSE_WR_FAULT_S, devid, pa, pa + XFER);
 }
 
 static pci_dev_t *find(pci_dev_t *devs, int n, uint16_t vendor, uint16_t device, int slot)
@@ -387,6 +426,76 @@ int main(void)
     edu_ack_irq(&dev_a);
     check(*delivered == 0x2a && refused(IOMMU_CAUSE_WR_FAULT_S, devid_a, file0.pa, file0.pa + 4),
           "MSI aimed at the interrupt file's physical address refused");
+
+    /* 17-20. The IOMMU's own structures. A device that could write its
+     * device context, the command queue or its page-table root could give
+     * itself any mapping; one that could read its context would learn how
+     * it is confined. The device's buffer holds a known pattern first, so a
+     * write that landed would show. */
+    fill(scratch.va, 0x77);
+    from_bus(&dev_a, IOVA_SCRATCH, 0);
+    ZF_LOGF_IF(!no_fault(), "pattern load");
+    uintptr_t dc_pa;
+    uint64_t *dc = riscv_iommu_dc(&iommu, devid_a, &dc_pa);
+    check(cannot_write(&dev_a, devid_a, dc, dc_pa), "device write to its own device context refused");
+    check(cannot_write(&dev_a, devid_a, iommu.cq, iommu.cq_pa),
+          "device write to the IOMMU command queue refused");
+    check(cannot_write(&dev_a, devid_a, dom.table_va[0], dom.table_pa[0]),
+          "device write to its own page-table root refused");
+    from_bus(&dev_a, dc_pa, 1024);
+    denied = refused(IOMMU_CAUSE_RD_FAULT_S, devid_a, dc_pa, dc_pa + XFER);
+    memset(scratch.va, 0, XFER);
+    to_bus(&dev_a, 1024, IOVA_SCRATCH);
+    check(denied && memcmp(scratch.va, dc, XFER) != 0 && no_fault(),
+          "device read of its own device context refused, nothing exfiltrated");
+
+    /* 21-25. Grant deadlines. Every grant carries a deadline, and expiry
+     * takes the page back without the device's cooperation: unmap, IOTLB
+     * invalidation and fence, then the page goes to its next owner. QEMU
+     * models no caches, so there is no cache maintenance to do. edu performs
+     * a started transfer regardless, as a device that ignores the revoke. */
+    rtc = map_device(RTC_PADDR, BIT(seL4_PageBits));
+    page_t lease = alloc_page();
+
+    ZF_LOGF_IF(iommu_map(&dom, IOVA_LEASE, lease.pa, true), "map lease");
+    ZF_LOGF_IF(edu_start_to_bus(&dev_a, 0, IOVA_LEASE, XFER), "start");
+    bool in_time = done_by(&dev_a, now_ns() + DEADLINE_LONG_NS);
+    check(in_time && holds(lease.va, 0x77) && no_fault(),
+          "a device that finishes before its deadline: its write lands");
+    ZF_LOGF_IF(iommu_unmap(&dom, IOVA_LEASE, true), "return lease");
+
+    /* The device uses the grant once, so its translation is cached, then
+     * starts a transfer it will not finish before the deadline. */
+    ZF_LOGF_IF(iommu_map(&dom, IOVA_LEASE, lease.pa, true), "map lease");
+    to_bus(&dev_a, 0, IOVA_LEASE);
+    ZF_LOGF_IF(!no_fault(), "warm-up");
+    memset(lease.va, 0, XFER);
+    ZF_LOGF_IF(edu_start_to_bus(&dev_a, 0, IOVA_LEASE, XFER), "start");
+    check(!done_by(&dev_a, now_ns() + DEADLINE_SHORT_NS),
+          "a device still busy at its deadline is not waited for");
+    ZF_LOGF_IF(iommu_unmap(&dom, IOVA_LEASE, true), "abort");
+    check(edu_dma_busy(&dev_a), "the abort completes while the device's transfer is pending");
+    fill(lease.va, 0x99); /* the next owner's data */
+    ZF_LOGF_IF(edu_dma_wait(&dev_a), "late transfer");
+    check(holds(lease.va, 0x99) &&
+          refused(IOMMU_CAUSE_WR_FAULT_S, devid_a, IOVA_LEASE, IOVA_LEASE + XFER),
+          "the device's late write is refused: the next owner's data is intact");
+
+    ZF_LOGF_IF(iommu_map(&dom, IOVA_LEASE, lease.pa, true), "map lease");
+    from_bus(&dev_a, IOVA_LEASE, 512);
+    ZF_LOGF_IF(!no_fault(), "warm-up");
+    memset(lease.va, 0, XFER);
+    ZF_LOGF_IF(edu_start_from_bus(&dev_a, IOVA_LEASE, 512, XFER), "start");
+    bool late = !done_by(&dev_a, now_ns() + DEADLINE_SHORT_NS);
+    ZF_LOGF_IF(iommu_unmap(&dom, IOVA_LEASE, true), "abort");
+    bool pending = edu_dma_busy(&dev_a);
+    fill(lease.va, 0xab); /* the next owner's data */
+    ZF_LOGF_IF(edu_dma_wait(&dev_a), "late transfer");
+    denied = refused(IOMMU_CAUSE_RD_FAULT_S, devid_a, IOVA_LEASE, IOVA_LEASE + XFER);
+    memset(scratch.va, 0, XFER);
+    to_bus(&dev_a, 512, IOVA_SCRATCH);
+    check(late && pending && denied && !holds(scratch.va, 0xab) && no_fault(),
+          "the device's late read is refused: nothing of the next owner's data leaks");
 
     printf("IOMMU gate: %d/%d checks passed\n", checks_passed, checks_run);
     printf("IOMMU_GATE: %s\n", checks_run > 0 && checks_passed == checks_run ? "PASS" : "FAIL");
