@@ -1,6 +1,6 @@
 # Zero-copy buffer handoff on seL4
 
-Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 35/35 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-02
+Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 37/37 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-03
 
 A buffer manager (the root task) lends frames to clients in their own address
 spaces and takes them back, so a producer's data reaches a consumer without
@@ -36,14 +36,26 @@ are expected.
   (read-write, or read-only), and map the copy at a fixed address in the
   client's address space. The command naming the buffer goes to the client as
   the reply to its last call.
-- **Take back:** revoke the manager's original capability. In seL4 a copied
-  capability is a child of its source, so the revoke deletes the client's
-  copy, and deleting a mapped frame capability unmaps it.
+- **Take back:** revoke the manager's original capability. The original is
+  revocable because it came from `Untyped_Retype`, and the copy covers the
+  same region, so `Revoke` on the original deletes the copy; deleting a mapped
+  frame capability unmaps it. The copy itself is not revocable: on RISC-V,
+  `Arch_isCapRevocable` returns false for every frame capability, whether
+  copied or minted. Revoking a copy therefore deletes nothing, and only the
+  holder of the original can take a buffer back. A manager that delegates to
+  a second-level manager cannot let the second level revoke its own grants;
+  the first level can only revoke the whole region.
+- **Page tables** that a grant creates in a client are never freed. Here the
+  addresses are reused, so the number is bounded; a long-running manager
+  would have to reclaim them.
 - With two clients, the manager keeps each one's reply capability
   (`seL4_CNode_SaveCaller`, non-MCS) so it can answer them in any order.
 - A client access that faults sends the fault to the manager. The manager maps
   a quarantine page at that address and resumes the client, so the access
-  completes harmlessly and the test can continue with the same client.
+  completes harmlessly and the test can continue with the same client. This
+  is harness policy, not production policy: a real manager would stop or
+  restart a client that faults, not give it a writable page to finish the
+  access.
 
 ## Checks
 
@@ -55,7 +67,9 @@ so a probe that could never succeed cannot pass as a refusal.
 | Client starts in its own address space | it calls the manager |
 | Read-write grant, client fills the buffer | checksum of what it reads back matches the pattern |
 | Write while granted | succeeds |
+| Revoke the client's copy, which holds a copy of its own | nothing is deleted: both copies remain, and the client still reads the buffer |
 | Revoke the original | the client's copy is gone (`Page_GetAddress` fails on its slot) |
+| The copy of the copy | gone too |
 | Write after revocation | VM fault at the buffer address |
 | The faulted write, resumed | completes on the quarantine page |
 | Read after revocation | VM fault at the buffer address |
@@ -96,7 +110,9 @@ reset before a window; and the enforced scheme not revoking the producer
 before granting the consumer. Step 4 mutants, checked on 2026-10-02: no
 revoke on expiry; a deadline of zero for the consumer that answers in time;
 and the alarm set before the deadline. Waiting for the holding consumer with
-no deadline at all hangs the manager, and the run fails on its timeout.
+no deadline at all hangs the manager, and the run fails on its timeout. Revocation mutants, checked on
+2026-10-03: revoking the original where the client's copy should be revoked,
+and taking the copy of the copy from another frame.
 
 ## Cost per handoff (step 3)
 
