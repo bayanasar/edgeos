@@ -9,7 +9,10 @@ stabilise.
 Licensed under BSD-3-Clause ([LICENSE](LICENSE)). A working [seL4test build and QEMU runner](kernel_architecture/sel4/sel4test_build_instructions.md)
 is available for development; it builds and tests pinned upstream code.
 The [IOMMU gate](kernel_architecture/sel4/iommu_gate/README.md) tests DMA and
-MSI confinement through QEMU's RISC-V IOMMU from a seL4 root task.
+MSI confinement through QEMU's RISC-V IOMMU from a seL4 root task. The
+[zero-copy handoff](kernel_architecture/sel4/zero_copy/README.md) passes
+buffers between isolated clients on seL4 without copying them, and takes them
+back by revoking the capability.
 
 ### Licensing
 
@@ -33,7 +36,8 @@ from the first push.
 
 ```
 kernel_architecture/
-  sel4/        seL4test build and QEMU runner, IOMMU gate, RSB-3720 overlay
+  sel4/        seL4test build and QEMU runner, IOMMU gate, zero-copy handoff,
+               RSB-3720 overlay
 sensor/        portable sensor drivers in Rust; sensor-core interface
 ```
 
