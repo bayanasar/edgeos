@@ -46,7 +46,7 @@ int edu_probe(edu_t *e, void *regs)
     return rd32(e, EDU_LIVENESS) == ~0x5a5a1234u ? 0 : -1;
 }
 
-static int dma(edu_t *e, uint64_t src, uint64_t dst, uint32_t len, uint64_t dir)
+static int start(edu_t *e, uint64_t src, uint64_t dst, uint32_t len, uint64_t dir)
 {
     if (rd64(e, EDU_DMA_CMD) & EDU_CMD_RUN) {
         return -1;
@@ -56,8 +56,18 @@ static int dma(edu_t *e, uint64_t src, uint64_t dst, uint32_t len, uint64_t dir)
     wr64(e, EDU_DMA_DST, dst);
     wr64(e, EDU_DMA_CNT, len);
     wr64(e, EDU_DMA_CMD, EDU_CMD_RUN | dir);
+    return 0;
+}
+
+int edu_dma_busy(edu_t *e)
+{
+    return (rd64(e, EDU_DMA_CMD) & EDU_CMD_RUN) != 0;
+}
+
+int edu_dma_wait(edu_t *e)
+{
     for (int i = 0; i < POLL_LIMIT; i++) {
-        if (!(rd64(e, EDU_DMA_CMD) & EDU_CMD_RUN)) {
+        if (!edu_dma_busy(e)) {
             __asm__ volatile("fence iorw, iorw" ::: "memory");
             return 0;
         }
@@ -65,20 +75,30 @@ static int dma(edu_t *e, uint64_t src, uint64_t dst, uint32_t len, uint64_t dir)
     return -1;
 }
 
-int edu_dma_to_bus(edu_t *e, uint32_t buf_off, uint64_t addr, uint32_t len)
+int edu_start_to_bus(edu_t *e, uint32_t buf_off, uint64_t addr, uint32_t len)
 {
     if (buf_off + len > EDU_BUF_SIZE) {
         return -1;
     }
-    return dma(e, EDU_BUF_BASE + buf_off, addr, len, EDU_CMD_TO_BUS);
+    return start(e, EDU_BUF_BASE + buf_off, addr, len, EDU_CMD_TO_BUS);
+}
+
+int edu_start_from_bus(edu_t *e, uint64_t addr, uint32_t buf_off, uint32_t len)
+{
+    if (buf_off + len > EDU_BUF_SIZE) {
+        return -1;
+    }
+    return start(e, addr, EDU_BUF_BASE + buf_off, len, 0);
+}
+
+int edu_dma_to_bus(edu_t *e, uint32_t buf_off, uint64_t addr, uint32_t len)
+{
+    return edu_start_to_bus(e, buf_off, addr, len) || edu_dma_wait(e);
 }
 
 int edu_dma_from_bus(edu_t *e, uint64_t addr, uint32_t buf_off, uint32_t len)
 {
-    if (buf_off + len > EDU_BUF_SIZE) {
-        return -1;
-    }
-    return dma(e, addr, EDU_BUF_BASE + buf_off, len, 0);
+    return edu_start_from_bus(e, addr, buf_off, len) || edu_dma_wait(e);
 }
 
 void edu_raise_irq(edu_t *e)
