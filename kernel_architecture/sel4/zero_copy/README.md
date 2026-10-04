@@ -1,6 +1,6 @@
 # Zero-copy buffer handoff on seL4
 
-Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 37/37 checks on QEMU 10.0.11; no timing yet · Updated: 2026-10-03
+Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 37/37 checks on QEMU 10.0.11; AArch64 timing build for the RSB-3720 compiles, not yet run on the board · Updated: 2026-10-03
 
 A buffer manager (the root task) lends frames to clients in their own address
 spaces and takes them back, so a producer's data reaches a consumer without
@@ -17,6 +17,15 @@ bash sel4test.sh prepare /tmp/sel4-work
 bash zero_copy.sh build /tmp/sel4-work
 bash zero_copy.sh test /tmp/sel4-work
 ```
+
+For the RSB-3720 (i.MX 8M Plus), `bash zero_copy.sh build /tmp/sel4-work rsb3720`
+builds `images/zero_copy-image-arm-imx8mp-evk` in `build-zero-copy-rsb3720`:
+the `imx8mp-evk` platform with `boards/rsb3720.dts`, a release kernel that
+still prints, and user access to the generic timer's virtual counter. There
+step 3 times the handoffs instead of counting kernel entries, and step 4 is
+not built (its timer is QEMU's). The image is a raw binary whose first byte
+belongs at the elfloader's entry point; load it there from U-Boot and `go`
+to the same address (`readelf -h build-zero-copy-rsb3720/elfloader/elfloader`).
 
 The test saves the serial log to `logs/build-zero-copy-test.log` and passes
 only on the success marker, a non-empty summary with every check passed, and no
@@ -198,4 +207,5 @@ synchronised and its cache maintained between the unmap and the return.
 - A board's timer: step 4 uses QEMU's goldfish RTC.
 - Device DMA. This is a CPU-only path: no IOMMU invalidation or cache
   maintenance is involved, and a single hart means no cross-core TLB shootdown.
-- Architectures other than RISC-V: the mapping calls are `seL4_RISCV_*`.
+- Timing on hardware: the AArch64 build has not run on the board yet.
+- A board timer for step 4.

@@ -58,6 +58,7 @@ target_link_libraries(
         utils
 )
 target_compile_options(zero_copy PRIVATE -Wall -Werror)
+target_compile_definitions(zero_copy PRIVATE ZC_PLATFORM="${PLATFORM}")
 
 include(rootserver)
 DeclareRootserver(zero_copy)

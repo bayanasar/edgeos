@@ -18,17 +18,32 @@ set(OPENSBI_PATH "${project_dir}/tools/opensbi" CACHE STRING "OpenSBI Folder loc
 set(SEL4_CONFIG_DEFAULT_ADVANCED ON)
 include(application_settings)
 
+# qemu-riscv-virt (the default) runs in simulation and counts kernel entries;
+# imx8mp-evk, for the RSB-3720, runs a release kernel and times handoffs.
 set(PLATFORM "qemu-riscv-virt" CACHE STRING "")
-set(RISCV64 ON CACHE BOOL "")
+if(PLATFORM STREQUAL "qemu-riscv-virt")
+    set(RISCV64 ON CACHE BOOL "")
+else()
+    set(AARCH64 ON CACHE BOOL "")
+endif()
 correct_platform_strings()
 
 find_package(seL4 REQUIRED)
 sel4_configure_platform_settings()
 
-set(SIMULATION ON CACHE BOOL "" FORCE)
-ApplyCommonSimulationSettings(${KernelSel4Arch})
-ApplyCommonReleaseVerificationSettings(FALSE FALSE)
 set(KernelMaxNumNodes 1 CACHE STRING "" FORCE)
 set(KernelIsMCS OFF CACHE BOOL "" FORCE)
-# Step 3 counts handoff costs from the kernel's log of its own entries.
-set(KernelBenchmarks "track_kernel_entries" CACHE STRING "" FORCE)
+if(PLATFORM STREQUAL "qemu-riscv-virt")
+    set(SIMULATION ON CACHE BOOL "" FORCE)
+    ApplyCommonSimulationSettings(${KernelSel4Arch})
+    ApplyCommonReleaseVerificationSettings(FALSE FALSE)
+    # Step 3 counts handoff costs from the kernel's log of its own entries.
+    set(KernelBenchmarks "track_kernel_entries" CACHE STRING "" FORCE)
+else()
+    # Step 3 times handoffs: a release kernel without assertions that still
+    # prints, and user access to the generic timer's virtual counter.
+    ApplyCommonReleaseVerificationSettings(TRUE FALSE)
+    set(KernelPrinting ON CACHE BOOL "" FORCE)
+    set(KernelArmExportVCNTUser ON CACHE BOOL "" FORCE)
+    set(KernelBenchmarks "none" CACHE STRING "" FORCE)
+endif()
