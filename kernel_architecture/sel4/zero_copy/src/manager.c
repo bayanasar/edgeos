@@ -8,9 +8,9 @@
  * and maps the copy into the client's address space. Taking a buffer back
  * revokes the original capability, which deletes every copy and with it
  * every mapping. The original is revocable because it came from
- * Untyped_Retype; a copy of a frame capability is not (on RISC-V,
- * Arch_isCapRevocable is false), so only the original's holder can take a
- * buffer back.
+ * Untyped_Retype; a copy of a frame capability is not (on RISC-V and
+ * AArch64, Arch_isCapRevocable is false), so only the original's holder can
+ * take a buffer back.
  *
  * Step 1 checks one client alone. Step 2 adds a consumer and passes a
  * stream of buffers from producer to consumer through a ring. Every
@@ -18,12 +18,14 @@
  * and the refusals are made while another client holds the buffer.
  * Faulting accesses are completed on a quarantine page, never a buffer.
  *
- * Step 3 counts what a handoff costs, from the kernel's own log of its
- * entries, against two baselines: a trusted copier, and one mapping shared
- * for good with no enforcement.
+ * Step 3 measures what a handoff costs against two baselines: a trusted
+ * copier, and one mapping shared for good with no enforcement. A build either
+ * counts the kernel's entries from its own log, or times the handoffs on the
+ * ARM generic timer's counter; logging every entry would slow what is timed.
  *
  * Step 4 gives a grant a deadline on a hardware timer and revokes on expiry,
- * without the client's cooperation.
+ * without the client's cooperation. Its timer is QEMU virt's, so it is built
+ * for that platform only.
  */
 #include <stdbool.h>
 #include <stdio.h>
@@ -44,7 +46,7 @@
 
 #include "protocol.h"
 
-/* A top-level page-table entry (1 GiB under Sv39) that nothing else uses. */
+/* A 1 GiB page-table entry (Sv39 top level, AArch64 level 1) that nothing else uses. */
 #define BUF_VADDR  0x2000000000ul
 #define BUF_LEN    BIT(seL4_PageBits)
 #define RING       4   /* buffers in the ring */
@@ -54,8 +56,17 @@
 #define COST_VADDR  (BUF_VADDR + BIT(21))      /* buffers of 4 KiB frames */
 #define LARGE_VADDR (BUF_VADDR + 2 * BIT(21))  /* a buffer of one 2 MiB frame */
 #define CLIENT_RESERVED BIT(23)
-#define COST_HANDOFFS 8
 #define MAX_FRAMES 16
+
+#if defined(CONFIG_BENCHMARK_TRACK_KERNEL_ENTRIES)
+#define COUNT_ENTRIES 1
+#define COST_HANDOFFS 8
+#elif defined(CONFIG_EXPORT_VCNT_USER)
+#define TIME_HANDOFFS 1
+#define COST_HANDOFFS 64
+#else
+#error "step 3 needs KernelBenchmarks track_kernel_entries or KernelArmExportVCNTUser"
+#endif
 
 /* Step 4: QEMU virt's goldfish RTC, a nanosecond counter with one alarm. */
 #define RTC_PADDR   0x101000
@@ -93,6 +104,46 @@ typedef struct {
 } answer_t;
 
 static frame_t quarantine;
+
+/* The mapping calls are all that differ between the architectures here. */
+#if defined(CONFIG_ARCH_RISCV)
+static int page_map(seL4_CPtr frame, seL4_CPtr vspace_root, seL4_Word va, seL4_CapRights_t rights)
+{
+    return seL4_RISCV_Page_Map(frame, vspace_root, va, rights, seL4_RISCV_Default_VMAttributes);
+}
+
+static int page_table_map(seL4_CPtr pt, seL4_CPtr vspace_root, seL4_Word va)
+{
+    return seL4_RISCV_PageTable_Map(pt, vspace_root, va, seL4_RISCV_Default_VMAttributes);
+}
+
+/* True if `slot` holds a frame capability; an emptied slot fails the lookup. */
+static bool holds_frame(seL4_CPtr slot)
+{
+    return seL4_RISCV_Page_GetAddress(slot).error == seL4_NoError;
+}
+
+#define PAGE_MAP_LABEL RISCVPageMap
+#elif defined(CONFIG_ARCH_AARCH64)
+static int page_map(seL4_CPtr frame, seL4_CPtr vspace_root, seL4_Word va, seL4_CapRights_t rights)
+{
+    return seL4_ARM_Page_Map(frame, vspace_root, va, rights, seL4_ARM_Default_VMAttributes);
+}
+
+static int page_table_map(seL4_CPtr pt, seL4_CPtr vspace_root, seL4_Word va)
+{
+    return seL4_ARM_PageTable_Map(pt, vspace_root, va, seL4_ARM_Default_VMAttributes);
+}
+
+static bool holds_frame(seL4_CPtr slot)
+{
+    return seL4_ARM_Page_GetAddress(slot).error == seL4_NoError;
+}
+
+#define PAGE_MAP_LABEL ARMPageMap
+#else
+#error "unsupported architecture"
+#endif
 
 static void bootstrap(void)
 {
@@ -145,8 +196,7 @@ static frame_t new_frame(seL4_Word bits)
 static int map_into(client_t *c, seL4_CPtr frame, seL4_Word va, seL4_CapRights_t rights)
 {
     for (int level = 0; level < 4; level++) {
-        int err = seL4_RISCV_Page_Map(frame, c->proc.pd.cptr, va, rights,
-                                      seL4_RISCV_Default_VMAttributes);
+        int err = page_map(frame, c->proc.pd.cptr, va, rights);
         if (err != seL4_FailedLookup) {
             return err;
         }
@@ -154,8 +204,7 @@ static int map_into(client_t *c, seL4_CPtr frame, seL4_Word va, seL4_CapRights_t
         if (vka_alloc_page_table(&vka, &pt)) {
             return -1;
         }
-        err = seL4_RISCV_PageTable_Map(pt.cptr, c->proc.pd.cptr, va,
-                                       seL4_RISCV_Default_VMAttributes);
+        err = page_table_map(pt.cptr, c->proc.pd.cptr, va);
         if (err) {
             return err;
         }
@@ -193,8 +242,7 @@ static int revoke(frame_t *f)
 /* Revokes `f` and releases the slot of the copy `g`, which the revoke emptied. */
 static bool take_back(frame_t *f, cspacepath_t *g)
 {
-    bool ok = revoke(f) == seL4_NoError
-              && seL4_RISCV_Page_GetAddress(g->capPtr).error != seL4_NoError;
+    bool ok = revoke(f) == seL4_NoError && !holds_frame(g->capPtr);
     vka_cspace_free_path(&vka, *g);
     return ok;
 }
@@ -324,15 +372,13 @@ static void single_client(client_t *p, frame_t *buf)
     cspacepath_t g2;
     ZF_LOGF_IF(vka_cspace_alloc_path(&vka, &g2), "slot");
     ZF_LOGF_IF(vka_cnode_copy(&g2, &g, seL4_AllRights), "copy of the copy");
-    bool kept = vka_cnode_revoke(&g) == seL4_NoError
-                && seL4_RISCV_Page_GetAddress(g2.capPtr).error == seL4_NoError;
+    bool kept = vka_cnode_revoke(&g) == seL4_NoError && holds_frame(g2.capPtr);
     a = command(p, CMD_PROBE_READ, va, 0);
     check(kept && !a.fault && a.sum == zc_pattern(2, 0),
           "revoking the client's copy takes nothing back: its copy and mapping remain");
 
     check(take_back(buf, &g), "revoking the frame deletes the client's copy");
-    check(seL4_RISCV_Page_GetAddress(g2.capPtr).error != seL4_NoError,
-          "revoking the frame also deletes a copy of the copy");
+    check(!holds_frame(g2.capPtr), "revoking the frame also deletes a copy of the copy");
     vka_cspace_free_path(&vka, g2);
     check(refused(p, command(p, CMD_PROBE_WRITE, va, 0), va),
           "after revocation a write faults at the buffer, and completes on quarantine");
@@ -412,7 +458,7 @@ static void producer_consumer(client_t *p, client_t *c, frame_t ring[RING])
 }
 
 /*
- * Step 3: what a handoff costs, as the kernel logs it.
+ * Step 3: what a handoff costs.
  *
  * Three schemes move the same buffer from producer to consumer:
  * - enforced: the step 2 handoff, a grant and a revoke on each side;
@@ -421,20 +467,19 @@ static void producer_consumer(client_t *p, client_t *c, frame_t ring[RING])
  * - shared: one buffer mapped for good, read-write in the producer and
  *   read-only in the consumer. Nothing stops the producer writing while the
  *   consumer reads, so the consumer trusts the producer: a floor for the cost.
- * The kernel logs every entry (KernelBenchmarks track_kernel_entries)
- * between a log reset and a finalize; the manager counts the bytes it copies.
- * QEMU's timing is not hardware timing, so only counts are reported.
+ *
+ * A counting build has the kernel log every entry (KernelBenchmarks
+ * track_kernel_entries) between a log reset and a finalize, and the manager
+ * counts the bytes it copies; QEMU's timing is not hardware timing, so only
+ * counts are reported there. A timing build reads the ARM generic timer's
+ * virtual counter (KernelArmExportVCNTUser) around each handoff and around
+ * the work that differs between the schemes: the grants and revokes, and the
+ * copy.
  *
  * A grant reuses the slot its last revoke emptied, as a long-running manager
  * would. Allocating and freeing a slot per grant would also log a
  * seL4_DebugCapIdentify per free, which vka_cspace_free makes in debug builds.
  */
-
-/* Cap types as the kernel logs them (include/arch/riscv/arch/64/mode/object/structures.bf). */
-enum { CAP_FRAME = 1, CAP_ENDPOINT = 4, CAP_REPLY = 8, CAP_CNODE = 10 };
-
-/* The kernel logs minus the syscall number. */
-#define SYS(n) ((seL4_Word)-(n))
 
 typedef enum { ENFORCED, COPIER, SHARED, SCHEMES } scheme_t;
 static const char *const scheme_name[SCHEMES] = { "enforced", "copier", "shared" };
@@ -455,11 +500,23 @@ typedef struct {
     seL4_Word reset;   /* benchmark and debug calls: only the reset that opens the window */
     seL4_Word irq;     /* unlabelled entries: interrupts (see tally_entry) */
     size_t copied;     /* bytes the manager copied */
+    /* Counter ticks in the window, timing builds only. */
+    uint64_t t_total;  /* the whole window */
+    uint64_t t_grant;  /* enforced: the grants (copy and map per frame), both sides */
+    uint64_t t_revoke; /* enforced: the revokes, both sides */
+    uint64_t t_copy;   /* copier: the copy */
 } tally_t;
+
+#ifdef COUNT_ENTRIES
+/* Cap types as the kernel logs them (arch/.../64/mode/object/structures.bf, RISC-V and AArch64). */
+enum { CAP_FRAME = 1, CAP_ENDPOINT = 4, CAP_REPLY = 8, CAP_CNODE = 10 };
+
+/* The kernel logs minus the syscall number. */
+#define SYS(n) ((seL4_Word)-(n))
 
 static benchmark_track_kernel_entry_t *kernel_log;
 
-static void log_init(void)
+static void window_init(void)
 {
     kernel_log = vspace_new_pages(&vspace, seL4_AllRights, 1, seL4_LargePageBits);
     ZF_LOGF_IF(kernel_log == NULL, "log buffer");
@@ -500,12 +557,63 @@ static void tally_entry(tally_t *t, kernel_entry_t e)
                && e.invocation_tag == CNodeRevoke) {
         t->revoke++;
     } else if (e.cap_type == CAP_FRAME && sys == SYS(seL4_SysCall)
-               && e.invocation_tag == RISCVPageMap) {
+               && e.invocation_tag == PAGE_MAP_LABEL) {
         t->map++;
     } else {
         t->other++;
     }
 }
+
+static void window_open(void)
+{
+    seL4_BenchmarkResetLog();
+}
+
+static void window_close(tally_t *t)
+{
+    seL4_Word entries = seL4_BenchmarkFinalizeLog();
+    for (seL4_Word i = 0; i < entries; i++) {
+        tally_entry(t, kernel_log[i].entry);
+    }
+}
+
+/* Counting builds take no timestamps. */
+static uint64_t stamp(void)
+{
+    return 0;
+}
+#else
+static uint64_t window_start;
+
+/* The generic timer's virtual counter; the isb keeps it after the work before it. */
+static uint64_t stamp(void)
+{
+    uint64_t t;
+    asm volatile("isb; mrs %0, cntvct_el0" : "=r"(t) : : "memory");
+    return t;
+}
+
+static uint64_t counter_hz(void)
+{
+    uint64_t f;
+    asm volatile("mrs %0, cntfrq_el0" : "=r"(f));
+    return f;
+}
+
+static void window_init(void)
+{
+}
+
+static void window_open(void)
+{
+    window_start = stamp();
+}
+
+static void window_close(tally_t *t)
+{
+    t->t_total = stamp() - window_start;
+}
+#endif
 
 static size_t buffer_len(const buffer_t *b)
 {
@@ -589,7 +697,7 @@ static void unmap_from_manager(buffer_t *b, uint8_t *va)
 }
 
 /*
- * Runs COST_HANDOFFS handoffs of one buffer under one scheme inside a log
+ * Runs COST_HANDOFFS handoffs of one buffer under one scheme inside a
  * window, after one handoff outside it that creates any page tables the
  * clients still lack. Sets `intact` if every consumer checksum equals the
  * producer's and the expected pattern.
@@ -603,6 +711,7 @@ static tally_t run(scheme_t s, client_t *p, client_t *c, int frames, seL4_Word b
     uint8_t *from = NULL, *to = NULL;
     answer_t made[COST_HANDOFFS + 1], seen[COST_HANDOFFS + 1];
     tally_t t = { 0 };
+    uint64_t grant_t = 0, revoke_t = 0, copy_t = 0, t0;
 
     alloc_paths(frames, gp);
     alloc_paths(frames, gc);
@@ -621,31 +730,43 @@ static tally_t run(scheme_t s, client_t *p, client_t *c, int frames, seL4_Word b
 
     for (uint32_t k = 0; k <= COST_HANDOFFS; k++) {
         if (k == 1) {
-            seL4_BenchmarkResetLog();
+            /* The handoff outside the window is not timed either. */
+            grant_t = revoke_t = copy_t = 0;
+            window_open();
         }
         if (s == ENFORCED) {
+            t0 = stamp();
             grant_buffer(&buf, p, va, seL4_ReadWrite, gp);
+            grant_t += stamp() - t0;
         }
         made[k] = command_len(p, CMD_FILL, va, len, 1000 + k);
         if (s == ENFORCED) {
+            t0 = stamp();
             revoke_buffer(&buf);
+            revoke_t += stamp() - t0;
+            t0 = stamp();
             grant_buffer(&buf, c, va, seL4_CanRead, gc);
+            grant_t += stamp() - t0;
         } else if (s == COPIER) {
+            t0 = stamp();
             memcpy(to, from, len);
+            copy_t += stamp() - t0;
             if (k > 0) {
                 t.copied += len;
             }
         }
         seen[k] = command_len(c, CMD_CHECK, va, len, 1000 + k);
         if (s == ENFORCED) {
+            t0 = stamp();
             revoke_buffer(&buf);
+            revoke_t += stamp() - t0;
         }
     }
-    seL4_Word entries = seL4_BenchmarkFinalizeLog();
+    window_close(&t);
+    t.t_grant = grant_t;
+    t.t_revoke = revoke_t;
+    t.t_copy = copy_t;
 
-    for (seL4_Word i = 0; i < entries; i++) {
-        tally_entry(&t, kernel_log[i].entry);
-    }
     *intact = true;
     for (uint32_t k = 0; k <= COST_HANDOFFS; k++) {
         *intact = *intact && !made[k].fault && !seen[k].fault
@@ -667,50 +788,116 @@ static tally_t run(scheme_t s, client_t *p, client_t *c, int frames, seL4_Word b
     return t;
 }
 
-static void cost(client_t *p, client_t *c)
+static const struct {
+    int frames;
+    seL4_Word bits;
+} sizes[] = {
+    { 1, seL4_PageBits },
+    { MAX_FRAMES, seL4_PageBits },
+    { 1, seL4_LargePageBits },
+};
+#define SIZES ARRAY_SIZE(sizes)
+
+#ifdef COUNT_ENTRIES
+static void report(tally_t t[SCHEMES][SIZES])
 {
-    static const struct {
-        int frames;
-        seL4_Word bits;
-    } sizes[] = {
-        { 1, seL4_PageBits },
-        { MAX_FRAMES, seL4_PageBits },
-        { 1, seL4_LargePageBits },
-    };
     const seL4_Word h = COST_HANDOFFS;
-    bool intact[SCHEMES] = { true, true, true };
     bool clean = true, ipc = true, cap_ops = true, copied = true;
 
-    log_init();
     for (scheme_t s = ENFORCED; s < SCHEMES; s++) {
-        for (size_t z = 0; z < ARRAY_SIZE(sizes); z++) {
-            bool ok;
-            tally_t t = run(s, p, c, sizes[z].frames, sizes[z].bits, &ok);
+        for (size_t z = 0; z < SIZES; z++) {
+            tally_t *u = &t[s][z];
             size_t len = (size_t)sizes[z].frames << sizes[z].bits;
             seL4_Word ops = s == ENFORCED ? 2 * (seL4_Word)sizes[z].frames * h : 0;
 
             printf("cost: %s, %zu bytes in %d frame(s), %lu handoffs: ipc %lu, save-caller %lu, "
                    "copy %lu, map %lu, revoke %lu, other %lu, reset %lu, copied %zu bytes; "
                    "%lu interrupts\n",
-                   scheme_name[s], len, sizes[z].frames, h, t.ipc, t.save, t.copy, t.map,
-                   t.revoke, t.other, t.reset, t.copied, t.irq);
-            intact[s] = intact[s] && ok;
-            clean = clean && t.other == 0 && t.reset == 1;
-            ipc = ipc && t.ipc == 6 * h && t.save == 2 * h;
-            cap_ops = cap_ops && t.copy == ops && t.map == ops && t.revoke == ops;
-            copied = copied && t.copied == (s == COPIER ? len * h : 0);
+                   scheme_name[s], len, sizes[z].frames, h, u->ipc, u->save, u->copy, u->map,
+                   u->revoke, u->other, u->reset, u->copied, u->irq);
+            clean = clean && u->other == 0 && u->reset == 1;
+            ipc = ipc && u->ipc == 6 * h && u->save == 2 * h;
+            cap_ops = cap_ops && u->copy == ops && u->map == ops && u->revoke == ops;
+            copied = copied && u->copied == (s == COPIER ? len * h : 0);
         }
     }
-    check(intact[ENFORCED], "enforced: every handoff arrives intact at 4 KiB, 64 KiB and 2 MiB");
-    check(intact[COPIER], "copier: every handoff arrives intact at every size");
-    check(intact[SHARED], "shared: every handoff arrives intact at every size");
     check(clean, "interrupts aside, the kernel logged nothing the protocol does not account for");
     check(ipc, "every scheme makes 3 IPC entries and 1 save-caller per command");
     check(cap_ops,
           "only the enforced scheme copies, maps and revokes: once per frame on each side");
     check(copied, "only the copier copies data: the buffer's length per handoff");
 }
+#else
+/* Nanoseconds per handoff for `ticks` over the window. */
+static uint64_t ns_per_handoff(uint64_t ticks)
+{
+    return ticks * 1000000000ull / counter_hz() / COST_HANDOFFS;
+}
 
+static void report(tally_t t[SCHEMES][SIZES])
+{
+    bool timed = counter_hz() > 0;
+
+    printf("time: counter at %lu Hz, %d handoffs per window\n", (unsigned long)counter_hz(),
+           COST_HANDOFFS);
+    for (scheme_t s = ENFORCED; s < SCHEMES; s++) {
+        for (size_t z = 0; z < SIZES; z++) {
+            tally_t *u = &t[s][z];
+            size_t len = (size_t)sizes[z].frames << sizes[z].bits;
+            printf("time: %s, %zu bytes in %d frame(s), ns per handoff: total %lu, "
+                   "grants %lu, revokes %lu, copy %lu\n",
+                   scheme_name[s], len, sizes[z].frames,
+                   (unsigned long)ns_per_handoff(u->t_total), (unsigned long)ns_per_handoff(u->t_grant),
+                   (unsigned long)ns_per_handoff(u->t_revoke), (unsigned long)ns_per_handoff(u->t_copy));
+            timed = timed && u->t_total > 0;
+        }
+    }
+    for (size_t z = 0; z < SIZES; z++) {
+        size_t len = (size_t)sizes[z].frames << sizes[z].bits;
+        uint64_t enforced = ns_per_handoff(t[ENFORCED][z].t_grant + t[ENFORCED][z].t_revoke);
+        uint64_t copier = ns_per_handoff(t[COPIER][z].t_copy);
+        /* Two revokes per frame per handoff, one on each side. */
+        uint64_t revoke_frame = ns_per_handoff(t[ENFORCED][z].t_revoke) / (2 * sizes[z].frames);
+        printf("time: %zu bytes: enforced grants and revokes %lu ns against the copy's %lu ns; "
+               "one revoke of a %lu-byte frame %lu ns; cheaper: %s\n",
+               len, (unsigned long)enforced, (unsigned long)copier,
+               (unsigned long)BIT(sizes[z].bits), (unsigned long)revoke_frame,
+               enforced < copier ? "enforced" : "copier");
+    }
+
+    /* sizes[]: 0 is one 4 KiB frame, 1 is sixteen, 2 is one 2 MiB frame. */
+    uint64_t e[SIZES], c[SIZES];
+    for (size_t z = 0; z < SIZES; z++) {
+        e[z] = t[ENFORCED][z].t_grant + t[ENFORCED][z].t_revoke;
+        c[z] = t[COPIER][z].t_copy;
+    }
+    check(timed, "the counter runs: every window took time");
+    check(e[1] > e[0] && e[1] > e[2],
+          "the enforced cost follows frames, not bytes: 16 small frames cost more than one of either size");
+    check(c[0] < c[1] && c[1] < c[2], "the copy follows bytes: 4 KiB < 64 KiB < 2 MiB");
+}
+#endif
+
+static void cost(client_t *p, client_t *c)
+{
+    static tally_t t[SCHEMES][SIZES];
+    bool intact[SCHEMES] = { true, true, true };
+
+    window_init();
+    for (scheme_t s = ENFORCED; s < SCHEMES; s++) {
+        for (size_t z = 0; z < SIZES; z++) {
+            bool ok;
+            t[s][z] = run(s, p, c, sizes[z].frames, sizes[z].bits, &ok);
+            intact[s] = intact[s] && ok;
+        }
+    }
+    check(intact[ENFORCED], "enforced: every handoff arrives intact at 4 KiB, 64 KiB and 2 MiB");
+    check(intact[COPIER], "copier: every handoff arrives intact at every size");
+    check(intact[SHARED], "shared: every handoff arrives intact at every size");
+    report(t);
+}
+
+#ifdef CONFIG_PLAT_QEMU_RISCV_VIRT
 /*
  * Step 4: a grant with a deadline.
  *
@@ -852,11 +1039,12 @@ static void deadlines(client_t *p, client_t *c)
     check(ok && !a.fault && a.sum == expected_sum(seq + 1),
           "after the abort the stream goes on: the next handoff arrives intact");
 }
+#endif
 
 int main(void)
 {
     bootstrap();
-    printf("zero-copy: buffer manager on qemu-riscv-virt\n");
+    printf("zero-copy: buffer manager on %s\n", ZC_PLATFORM);
     quarantine = new_frame(seL4_PageBits);
 
     client_t producer, consumer;
@@ -877,7 +1065,11 @@ int main(void)
     }
     producer_consumer(&producer, &consumer, ring);
     cost(&producer, &consumer);
+#ifdef CONFIG_PLAT_QEMU_RISCV_VIRT
     deadlines(&producer, &consumer);
+#else
+    printf("step 4 not built: its timer is QEMU virt's goldfish RTC\n");
+#endif
 
     printf("Zero copy: %d/%d checks passed\n", checks_passed, checks_run);
     printf("ZERO_COPY: %s\n", checks_passed == checks_run ? "PASS" : "FAIL");

@@ -2,19 +2,33 @@
 set -euo pipefail
 
 usage() {
-    echo "Usage: $0 {build|test} WORKSPACE" >&2
+    echo "Usage: $0 {build|test} WORKSPACE [qemu-riscv64|rsb3720]" >&2
     echo "WORKSPACE must be prepared by: sel4test.sh prepare WORKSPACE" >&2
     echo "Environment: DOCKER_WORKSPACE, TEST_TIMEOUT, BUILD_JOBS" >&2
     exit 2
 }
 
-[[ $# -eq 2 ]] || usage
+[[ $# -ge 2 && $# -le 3 ]] || usage
 action=$1
 case "$action" in build|test) ;; *) usage ;; esac
 workspace=$(realpath -m -- "$2")
 script_dir=$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)
 source "$script_dir/pins.sh"
-build=build-zero-copy
+profile=${3:-qemu-riscv64}
+
+case "$profile" in
+    qemu-riscv64)
+        build=build-zero-copy
+        config=(-DCROSS_COMPILER_PREFIX=riscv64-unknown-elf-)
+        ;;
+    rsb3720)
+        # i.MX 8M Plus EVK platform with the board's overlay, staged with the sources.
+        build=build-zero-copy-rsb3720
+        config=(-DPLATFORM=imx8mp-evk -DCROSS_COMPILER_PREFIX=aarch64-linux-gnu-
+                -DKernelCustomDTSOverlay=/work/sel4test/projects/zero_copy/rsb3720.dts)
+        ;;
+    *) usage ;;
+esac
 
 actual=$(git -C "$workspace/sel4test/.repo/manifests" rev-parse HEAD 2>/dev/null || true)
 [[ $actual == "$manifest" ]] || {
@@ -31,13 +45,17 @@ if [[ $action == build ]]; then
     # The container sees only the workspace, so stage the sources into it.
     rm -rf -- "$workspace/sel4test/projects/zero_copy"
     cp -r -- "$script_dir/zero_copy" "$workspace/sel4test/projects/zero_copy"
+    cp -- "$script_dir/boards/rsb3720.dts" "$workspace/sel4test/projects/zero_copy/"
     mkdir -p -- "$workspace/sel4test/$build"
     "${container[@]}" "$image" sh -c \
-        'cmake -G Ninja -DCROSS_COMPILER_PREFIX=riscv64-unknown-elf- \
-            -C ../projects/zero_copy/settings.cmake ../projects/zero_copy &&
-         ninja -j"$BUILD_JOBS"' \
+        'cmake -G Ninja "$@" -C ../projects/zero_copy/settings.cmake ../projects/zero_copy &&
+         ninja -j"$BUILD_JOBS"' sh "${config[@]}" \
         2>&1 | tee "$workspace/logs/$build.log"
 else
+    [[ $profile == qemu-riscv64 ]] || {
+        echo "The rsb3720 profile is build-only: load images/zero_copy-image-* on the board" >&2
+        exit 2
+    }
     [[ -d $workspace/sel4test/$build ]] || {
         echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
     }
