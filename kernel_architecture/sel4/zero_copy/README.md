@@ -1,6 +1,6 @@
 # Zero-copy buffer handoff on seL4
 
-Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel, and revocation on a deadline; 37/37 checks on QEMU 10.0.11; AArch64 timing build for the RSB-3720 compiles, not yet run on the board · Updated: 2026-10-03
+Status: all 4 steps — one client, producer to consumer through a ring, the cost per handoff counted by the kernel and timed on an RSB-3720, and revocation on a deadline; 37/37 checks on QEMU 10.0.11, 30/30 on the board · Updated: 2026-10-21
 
 A buffer manager (the root task) lends frames to clients in their own address
 spaces and takes them back, so a producer's data reaches a consumer without
@@ -26,6 +26,8 @@ step 3 times the handoffs instead of counting kernel entries, and step 4 is
 not built (its timer is QEMU's). The image is a raw binary whose first byte
 belongs at the elfloader's entry point; load it there from U-Boot and `go`
 to the same address (`readelf -h build-zero-copy-rsb3720/elfloader/elfloader`).
+The board runs 30 checks: step 3 replaces its four count checks with three
+timing checks, and step 4 is not built.
 
 The test saves the serial log to `logs/build-zero-copy-test.log` and passes
 only on the success marker, a non-empty summary with every check passed, and no
@@ -160,8 +162,8 @@ follows the number of frames, not the bytes, so a 2 MiB buffer in one large
 frame costs what a 4 KiB one does.
 
 What the counts do not show: the work inside each invocation, above all the
-TLB flush when a revoke unmaps a frame, and a copy's cost in time. Which
-scheme is cheaper at a given size is a timing question for a board. The
+TLB flush when a revoke unmaps a frame, and a copy's cost in time; the board
+timing below measures those. The
 interrupts in a window are logged too, but they track how long the clients
 ran under QEMU, vary between runs, and are left out of the counts.
 
@@ -175,6 +177,41 @@ Two things the kernel log taught:
   `seL4_DebugCapIdentify`, a kernel entry per free. The step 3 manager reuses
   the slot each revoke empties instead of freeing and allocating one per
   grant, as a long-running manager would.
+
+## Time per handoff on an RSB-3720 (step 3)
+
+The board build times the three schemes instead of counting kernel entries.
+It reads the generic timer's virtual counter (`cntvct_el0`, 8 MHz on this
+board, so one tick is 125 ns) around each window of 64 handoffs, and around
+the grants, revokes and copies inside it. Release kernel, one core, non-MCS;
+the clients write and checksum the whole buffer on every handoff.
+
+Nanoseconds per handoff, lowest and highest of three runs:
+
+| Buffer | Enforced: grants and revokes | Copier: the copy | One revoke, per frame | Cheaper |
+|---|---|---|---|---|
+| 4 KiB, one frame | 7,339–7,406 | 687–718 | 1,941–1,952 | copier, about 10× |
+| 64 KiB, 16 frames of 4 KiB | 72,201–72,298 | 12,537–12,732 | 1,057–1,058 | copier, about 6× |
+| 2 MiB, one frame of 2 MiB | 7,849–7,884 | 1,015,109–1,033,203 | 1,706–1,873 | enforced, about 130× |
+
+Each scheme's whole handoff is longer than the shared scheme's by about the
+figure in the table (at 4 KiB, 63.5 µs enforced and 56.4 µs copier against
+55.7 µs shared), so the timed parts are the parts that differ.
+
+- The enforced cost follows frames, as the counts said: one frame costs 7.3
+  to 7.9 µs of grants and revokes whether it holds 4 KiB or 2 MiB, and sixteen
+  4 KiB frames cost 72 µs, 4.5 µs each.
+- A revoke, TLB flush included, takes 1.7 to 2.0 µs for a frame on its own,
+  and 1.1 µs per frame when sixteen are revoked in a row.
+- The copy follows bytes: 0.17 to 0.19 ns per byte up to 64 KiB, and 0.48 to
+  0.49 at 2 MiB.
+
+So copying 4 KiB costs a tenth of lending it, and in 4 KiB frames the enforced
+scheme never pays. In one 2 MiB frame it pays once a copy of the payload would
+cost more than its 7.9 µs: at the 64 KiB copy rate, above about 40 KiB per
+handoff. That point is interpolated between the 4 KiB and 64 KiB sizes, not
+measured. Both schemes pay once per handoff, so the rate of handoffs scales
+both costs and does not move the point.
 
 ## Deadlines (step 4)
 
@@ -200,12 +237,8 @@ synchronised and its cache maintained between the unmap and the return.
 
 - Handoffs are sequential: the producer does not fill the next buffer while
   the consumer reads one.
-- Time per handoff. QEMU's timing is not hardware timing, so the step 3
-  counts need a board to become costs.
 - A deadline abort for a device that ignores the revoke, with IOTLB and cache
   maintenance. The IOMMU gate is where that can be tested.
 - A board's timer: step 4 uses QEMU's goldfish RTC.
 - Device DMA. This is a CPU-only path: no IOMMU invalidation or cache
   maintenance is involved, and a single hart means no cross-core TLB shootdown.
-- Timing on hardware: the AArch64 build has not run on the board yet.
-- A board timer for step 4.
