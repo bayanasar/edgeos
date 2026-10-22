@@ -234,6 +234,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "pd-timer"
+version = "0.1.0"
+dependencies = [
+ "pd-common",
+ "sel4-microkit",
+ "sensor-core",
+ "sensor-imx-gpt",
+]
+
+[[package]]
 name = "pest"
 version = "2.9.4"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -598,6 +608,13 @@ dependencies = [
 [[package]]
 name = "sensor-core"
 version = "0.1.0"
+
+[[package]]
+name = "sensor-imx-gpt"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+]
 
 [[package]]
 name = "sensor-imx-i2c"

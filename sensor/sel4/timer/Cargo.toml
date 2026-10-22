@@ -1,0 +1,16 @@
+[package]
+name = "pd-timer"
+version = "0.1.0"
+description = "An i.MX GPT in a domain of its own: deadlines for one client"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "timer"
+path = "src/main.rs"
+
+[dependencies]
+pd-common.workspace = true
+sel4-microkit.workspace = true
+sensor-core.workspace = true
+sensor-imx-gpt.workspace = true
