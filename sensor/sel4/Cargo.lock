@@ -227,6 +227,7 @@ name = "pd-i2c-imx"
 version = "0.1.0"
 dependencies = [
  "pd-common",
+ "sel4",
  "sel4-microkit",
  "sensor-core",
  "sensor-imx-i2c",

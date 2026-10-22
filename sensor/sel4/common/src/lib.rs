@@ -20,6 +20,8 @@ pub const I2C_FROM_BMP280: Channel = Channel::new(0);
 pub const CONSUMER_TO_BMP280: Channel = Channel::new(0);
 /// In the BMP280 domain: the consumer's channel.
 pub const BMP280_FROM_CONSUMER: Channel = Channel::new(1);
+/// In the I2C controller's domain: the controller's interrupt.
+pub const I2C_IRQ: Channel = Channel::new(1);
 /// In the I2C controller's domain: its channel to the timer's domain.
 pub const I2C_TO_TIMER: Channel = Channel::new(2);
 /// In the timer's domain: the timer's interrupt.

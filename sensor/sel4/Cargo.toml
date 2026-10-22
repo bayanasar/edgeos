@@ -11,6 +11,7 @@ license = "BSD-3-Clause"
 
 [workspace.dependencies]
 sel4-microkit = { git = "https://github.com/seL4/rust-sel4", rev = "86a0dbf4f53e6766734331c5df61851489ed38a1", default-features = false }
+sel4 = { git = "https://github.com/seL4/rust-sel4", rev = "86a0dbf4f53e6766734331c5df61851489ed38a1", default-features = false }
 sensor-core = { path = "../core" }
 sensor-bmp280 = { path = "../drivers/bmp280" }
 sensor-imx-gpt = { path = "../imx-gpt" }
