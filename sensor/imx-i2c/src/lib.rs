@@ -1,12 +1,18 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! The I2C controller of the i.MX 8M family (`fsl,imx21-i2c`) as a polled
-//! [`I2c`] master.
+//! The I2C controller of the i.MX 8M family (`fsl,imx21-i2c`) as an [`I2c`]
+//! master.
 //!
-//! The register sequence is Linux's `drivers/i2c/busses/i2c-imx.c` in its
-//! atomic mode: polled, single master, no DMA. Registers are 8 bits wide and
-//! 4 bytes apart, and the status flags clear when written as 0. Register
-//! access goes through [`Regs`], so the same code drives the hardware from an
-//! isolated component and a register model in tests.
+//! The register sequence is Linux's `drivers/i2c/busses/i2c-imx.c`: single
+//! master, no DMA. Registers are 8 bits wide and 4 bytes apart, and the
+//! status flags clear when written as 0. Register access goes through
+//! [`Regs`], so the same code drives the hardware from an isolated component
+//! and a register model in tests.
+//!
+//! While a byte is on the bus the driver hands over to a [`Wait`]: [`Poll`]
+//! reads the status until the deadline, as Linux's atomic mode does; an
+//! interrupt-driven waiter blocks until the controller's interrupt, as
+//! Linux's normal mode does. The short waits for the bus to turn busy or
+//! idle always poll, as they do in Linux.
 //!
 //! The controller must already be clocked and its pads muxed to I2C; neither
 //! is this driver's to touch, since both registers are shared with the rest
@@ -56,6 +62,37 @@ pub trait Regs {
     fn write(&mut self, offset: usize, value: u8);
 }
 
+/// What the driver does while a byte is on the bus.
+pub trait Wait {
+    /// Whether the controller raises its interrupt (I2CR.IIEN) when a byte
+    /// completes.
+    const INTERRUPT: bool;
+
+    /// Called while a byte is on the bus and IIF is still clear. Returns once
+    /// IIF may be set, after which the driver reads the status again, or
+    /// `Err(Timeout)` once `deadline` has passed.
+    fn wait(&mut self, clock: &impl Clock, deadline: Instant) -> Result<(), BusError>;
+
+    /// Called at the end of every transfer that reached the controller, once
+    /// the block is disabled and can no longer interrupt.
+    fn finish(&mut self) {}
+}
+
+/// Polls the status register until the deadline.
+pub struct Poll;
+
+impl Wait for Poll {
+    const INTERRUPT: bool = false;
+
+    fn wait(&mut self, clock: &impl Clock, deadline: Instant) -> Result<(), BusError> {
+        if clock.now() >= deadline {
+            Err(BusError::Timeout)
+        } else {
+            Ok(())
+        }
+    }
+}
+
 impl<T: Regs + ?Sized> Regs for &mut T {
     fn read(&mut self, offset: usize) -> u8 {
         (**self).read(offset)
@@ -66,17 +103,30 @@ impl<T: Regs + ?Sized> Regs for &mut T {
     }
 }
 
-pub struct ImxI2c<R, C> {
+pub struct ImxI2c<R, C, W = Poll> {
     regs: R,
     clock: C,
     ifdr: u8,
+    wait: W,
 }
 
-impl<R: Regs, C: Clock> ImxI2c<R, C> {
-    /// `ifdr` selects the bus clock from the controller's root clock, for
-    /// example [`IFDR_24MHZ_100KHZ`].
+impl<R: Regs, C: Clock> ImxI2c<R, C, Poll> {
+    /// A polled driver. `ifdr` selects the bus clock from the controller's
+    /// root clock, for example [`IFDR_24MHZ_100KHZ`].
     pub fn new(regs: R, clock: C, ifdr: u8) -> Self {
-        ImxI2c { regs, clock, ifdr }
+        Self::with_wait(regs, clock, ifdr, Poll)
+    }
+}
+
+impl<R: Regs, C: Clock, W: Wait> ImxI2c<R, C, W> {
+    /// A driver that waits for bytes with `wait`.
+    pub fn with_wait(regs: R, clock: C, ifdr: u8, wait: W) -> Self {
+        ImxI2c {
+            regs,
+            clock,
+            ifdr,
+            wait,
+        }
     }
 
     pub fn release(self) -> (R, C) {
@@ -132,9 +182,7 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
                 }
                 return Ok(sr);
             }
-            if self.clock.now() >= deadline {
-                return Err(BusError::Timeout);
-            }
+            self.wait.wait(&self.clock, deadline)?;
         }
     }
 
@@ -157,7 +205,9 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
         let control = self.control() | I2CR_MSTA;
         self.set_control(control);
         self.wait_bus(true, deadline)?;
-        self.set_control(control | I2CR_MTX | I2CR_TXAK);
+        // From here every write to I2CR keeps IIEN, until stop() clears it.
+        let iien = if W::INTERRUPT { I2CR_IIEN } else { 0 };
+        self.set_control(control | I2CR_MTX | I2CR_TXAK | iien);
         Ok(())
     }
 
@@ -228,7 +278,7 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
     }
 }
 
-impl<R: Regs, C: Clock> I2c for ImxI2c<R, C> {
+impl<R: Regs, C: Clock, W: Wait> I2c for ImxI2c<R, C, W> {
     fn transfer(
         &mut self,
         addr: u8,
@@ -246,6 +296,7 @@ impl<R: Regs, C: Clock> I2c for ImxI2c<R, C> {
             .start(deadline)
             .and_then(|()| self.exchange(addr, write, read, deadline));
         let stopped = self.stop();
+        self.wait.finish();
         result.and(stopped)
     }
 }

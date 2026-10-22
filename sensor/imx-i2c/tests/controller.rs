@@ -2,7 +2,8 @@
 //! The driver against a register model of the controller, with the fake
 //! bus's device models behind it.
 
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
+use std::rc::Rc;
 
 use sensor_bmp280::{ADDR_SDO_LOW, Bmp280, CHIP_ID};
 use sensor_core::bus::{BusError, Clock, I2c, Instant};
@@ -67,6 +68,16 @@ struct Model {
     held: bool,
     /// A start never takes the bus.
     no_start: bool,
+    /// The driver waits for interrupts: a byte completes only when the
+    /// driver waits for it.
+    irq: bool,
+    /// A byte is on the bus and has not completed.
+    in_flight: bool,
+    /// Bytes put on the bus.
+    bytes: usize,
+    /// Times the driver waited, and transfers it finished.
+    waits: usize,
+    finishes: usize,
 }
 
 impl Model {
@@ -89,7 +100,17 @@ impl Model {
             hang: false,
             held: false,
             no_start: false,
+            irq: false,
+            in_flight: false,
+            bytes: 0,
+            waits: 0,
+            finishes: 0,
         }
+    }
+
+    fn interrupt_driven(mut self) -> Self {
+        self.irq = true;
+        self
     }
 
     fn with(dev: impl FakeDevice + 'static) -> Self {
@@ -101,7 +122,13 @@ impl Model {
     }
 
     fn byte_done(&mut self) {
-        if !self.hang {
+        if self.hang {
+            return;
+        }
+        self.bytes += 1;
+        if self.irq {
+            self.in_flight = true;
+        } else {
             self.iif = true;
         }
     }
@@ -153,10 +180,11 @@ impl Model {
             }
             self.busy = self.held;
             self.iif = false;
+            self.in_flight = false;
             self.phase = Phase::Idle;
             return;
         }
-        if value & I2CR_IIEN != 0 {
+        if value & I2CR_IIEN != 0 && !self.irq {
             self.violation("interrupt enabled in a polled driver");
         }
         let (was, is) = (old & I2CR_MSTA != 0, value & I2CR_MSTA != 0);
@@ -271,6 +299,72 @@ impl Regs for Model {
             _ => panic!("write of offset {offset:#x}"),
         }
     }
+}
+
+/// The model shared with the waiter that stands in for its interrupt.
+#[derive(Clone)]
+struct Shared(Rc<RefCell<Model>>);
+
+impl Shared {
+    fn new(model: Model) -> Self {
+        Shared(Rc::new(RefCell::new(model.interrupt_driven())))
+    }
+}
+
+impl Regs for Shared {
+    fn read(&mut self, offset: usize) -> u8 {
+        self.0.borrow_mut().read(offset)
+    }
+
+    fn write(&mut self, offset: usize, value: u8) {
+        self.0.borrow_mut().write(offset, value)
+    }
+}
+
+/// The controller's interrupt: completes the byte on the bus. A wait with
+/// nothing on the bus, or with the interrupt disabled, would block until the
+/// deadline on hardware, so it is a violation here.
+struct Interrupt(Shared);
+
+impl Wait for Interrupt {
+    const INTERRUPT: bool = true;
+
+    fn wait(&mut self, clock: &impl Clock, deadline: Instant) -> Result<(), BusError> {
+        let mut m = self.0.0.borrow_mut();
+        m.waits += 1;
+        if m.control & I2CR_IIEN == 0 {
+            m.violation("waited with the interrupt disabled");
+        }
+        if m.in_flight {
+            m.in_flight = false;
+            m.iif = true;
+            return Ok(());
+        }
+        if !m.hang {
+            m.violation("waited with no byte on the bus");
+        }
+        clock.sleep_until(deadline);
+        Err(BusError::Timeout)
+    }
+
+    fn finish(&mut self) {
+        let mut m = self.0.0.borrow_mut();
+        m.finishes += 1;
+        if m.control != 0 {
+            m.violation("finished with the block enabled");
+        }
+    }
+}
+
+fn interrupt_driven(model: Model) -> (Shared, ImxI2c<Shared, StepClock, Interrupt>) {
+    let shared = Shared::new(model);
+    let i2c = ImxI2c::with_wait(
+        shared.clone(),
+        StepClock::default(),
+        IFDR_24MHZ_100KHZ,
+        Interrupt(shared.clone()),
+    );
+    (shared, i2c)
 }
 
 fn deadline() -> Instant {
@@ -433,7 +527,11 @@ fn a_start_that_never_takes_the_bus_times_out_within_the_bus_limit() {
     );
     let (_, clock) = i2c.release();
     // 50 us to settle, then 1 ms of polling: far short of the deadline.
-    assert!(clock.0.get() < 2_000_000, "polled until {} ns", clock.0.get());
+    assert!(
+        clock.0.get() < 2_000_000,
+        "polled until {} ns",
+        clock.0.get()
+    );
     assert!(model.log.is_empty());
     assert_released(&model);
 }
@@ -483,4 +581,91 @@ fn bad_arguments_touch_no_register() {
     let _ = i2c.release();
     assert_eq!(model.ifdr, 0);
     assert!(model.log.is_empty());
+}
+
+#[test]
+fn interrupt_driven_bmp280_matches_the_fake_bus() {
+    let (shared, i2c) = interrupt_driven(Model::with(bmp280()));
+    let (clock_a, clock_b) = (FakeClock::new(), FakeClock::new());
+    let mut via_controller = Bmp280::new(i2c, ADDR_SDO_LOW, 7, 1);
+    let mut via_fake = Bmp280::new(FakeI2c::with_device(bmp280()), ADDR_SDO_LOW, 7, 1);
+    via_controller.init(&clock_a).unwrap();
+    via_fake.init(&clock_b).unwrap();
+    for _ in 0..3 {
+        assert_eq!(
+            via_controller.read(&clock_a).unwrap(),
+            via_fake.read(&clock_b).unwrap()
+        );
+    }
+    let _ = via_controller.release();
+    let fake = via_fake.release();
+
+    let m = shared.0.borrow();
+    assert_eq!(m.log, fake.log, "the same transfers reached the chip");
+    assert!(m.bytes > 0);
+    assert_eq!(m.waits, m.bytes, "one wait per byte, none spurious");
+    assert_eq!(m.finishes, m.log.len(), "every transfer finished");
+    assert_released(&m);
+}
+
+#[test]
+fn interrupt_driven_reads_of_every_length() {
+    for n in [1, 2, 3, 6, 24] {
+        let (shared, mut i2c) = interrupt_driven(Model::with(counter(0x50)));
+        let mut buf = vec![0; n];
+        i2c.transfer(0x50, &[0x10], &mut buf, deadline()).unwrap();
+        drop(i2c);
+        let want: Vec<u8> = (0x10..0x10 + n).map(|i| i as u8 ^ 0xa5).collect();
+        assert_eq!(buf, want, "{n} bytes");
+        let m = shared.0.borrow();
+        assert_eq!(m.log[0].read_len, n, "exactly {n} bytes clocked in");
+        // Address, register, address, then n bytes.
+        assert_eq!(m.waits, 3 + n);
+        assert_eq!(m.finishes, 1);
+        assert_released(&m);
+    }
+}
+
+#[test]
+fn interrupt_driven_nak_releases_the_bus() {
+    let (shared, mut i2c) = interrupt_driven(Model::with(counter(0x50)));
+    assert_eq!(
+        i2c.transfer(0x76, &[0], &mut [0; 4], deadline()),
+        Err(BusError::Nak)
+    );
+    assert_eq!(i2c.transfer(0x50, &[0], &mut [0], deadline()), Ok(()));
+    drop(i2c);
+    let m = shared.0.borrow();
+    assert_eq!(m.finishes, 2);
+    assert!(m.log.iter().all(|t| t.addr == 0x50));
+    assert_released(&m);
+}
+
+#[test]
+fn interrupt_driven_byte_that_never_finishes_times_out() {
+    let mut model = Model::with(counter(0x50));
+    model.hang = true;
+    let (shared, mut i2c) = interrupt_driven(model);
+    assert_eq!(
+        i2c.transfer(0x50, &[0], &mut [0], deadline()),
+        Err(BusError::Timeout)
+    );
+    drop(i2c);
+    let m = shared.0.borrow();
+    assert_eq!(m.waits, 1);
+    assert_eq!(m.finishes, 1);
+    assert!(m.log.is_empty());
+    assert_released(&m);
+}
+
+#[test]
+fn bad_arguments_reach_neither_the_controller_nor_the_waiter() {
+    let (shared, mut i2c) = interrupt_driven(Model::with(counter(0x50)));
+    assert_eq!(
+        i2c.transfer(0x50, &[], &mut [], deadline()),
+        Err(BusError::Invalid)
+    );
+    drop(i2c);
+    let m = shared.0.borrow();
+    assert_eq!((m.ifdr, m.waits, m.finishes), (0, 0, 0));
 }
