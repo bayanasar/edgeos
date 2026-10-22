@@ -89,6 +89,14 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
         self.regs.write(I2CR, value)
     }
 
+    /// Clears the given status flags, as Linux's `i2c_imx_clear_irq` does.
+    /// On this controller IIF and IAL clear when written as 0 and the other
+    /// bits are read-only, so writing 1 everywhere else changes nothing.
+    /// (Vybrid's controller clears by writing 1; it is not supported.)
+    fn clear_flags(&mut self, flags: u8) {
+        self.regs.write(I2SR, !flags)
+    }
+
     /// Waits until the bus-busy flag equals `busy`. Lost arbitration means
     /// another master or a stuck line: an I/O error, not a retry.
     fn wait_bus(&mut self, busy: bool, deadline: Instant) -> Result<(), BusError> {
@@ -111,8 +119,7 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
         loop {
             let sr = self.regs.read(I2SR);
             if sr & I2SR_IIF != 0 {
-                // Written as 0, IIF and IAL clear; the other bits ignore it.
-                self.regs.write(I2SR, !(I2SR_IIF | I2SR_IAL));
+                self.clear_flags(I2SR_IIF | I2SR_IAL);
                 if sr & I2SR_IAL != 0 {
                     return Err(BusError::Io);
                 }
@@ -135,7 +142,7 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
 
     fn start(&mut self, deadline: Instant) -> Result<(), BusError> {
         self.regs.write(IFDR, self.ifdr);
-        self.regs.write(I2SR, 0);
+        self.clear_flags(I2SR_IIF | I2SR_IAL);
         self.set_control(I2CR_IEN);
         if let Some(t) = self.clock.now().checked_add(ENABLE_SETTLE) {
             self.clock.sleep_until(t);
