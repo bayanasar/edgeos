@@ -1,0 +1,14 @@
+[package]
+name = "sensor-imx-i2c"
+version = "0.1.0"
+description = "Polled i.MX 8M I2C controller as a sensor-core I2C master"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sensor-core = { path = "../core" }
+
+[dev-dependencies]
+sensor-bmp280 = { path = "../drivers/bmp280" }
+sensor-fake = { path = "../fake" }

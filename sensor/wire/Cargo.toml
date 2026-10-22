@@ -1,0 +1,10 @@
+[package]
+name = "sensor-wire"
+version = "0.1.0"
+description = "Sensor records and I2C requests as 64-bit message words, for IPC in registers"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sensor-core = { path = "../core" }
