@@ -80,8 +80,13 @@ impl Default for CounterClock {
 }
 
 impl Clock for CounterClock {
+    /// Whole seconds and the remainder are converted apart, in 64 bits: polling
+    /// loops call this, and a 128-bit division is a library call. The
+    /// remainder is below the counter's rate, so its product with 10^9 fits
+    /// for any rate under 18 GHz.
     fn now(&self) -> Instant {
-        let ns = u128::from(Self::ticks()) * 1_000_000_000 / u128::from(self.hz.max(1));
+        let (t, hz) = (Self::ticks(), self.hz.max(1));
+        let ns = t / hz * 1_000_000_000 + t % hz * 1_000_000_000 / hz;
         Instant::from_nanos(ns as i64)
     }
 
