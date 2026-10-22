@@ -43,10 +43,12 @@ pub const IFDR_24MHZ_100KHZ: u8 = 0x0f;
 
 /// Linux waits 50 us after enabling the block before taking the bus.
 const ENABLE_SETTLE: Duration = Duration::from_micros(50);
-/// Budget for the stop that ends every transfer, counted from when it is
-/// issued, so a transfer that timed out still releases the bus. A stop takes
-/// about 10 us at 100 kHz.
-const STOP_LIMIT: Duration = Duration::from_millis(1);
+/// Budget for the bus to turn busy after a start or idle after a stop. Each
+/// takes about one bit time, 10 us at 100 kHz, so a longer wait means a
+/// stuck line; these waits poll, and the bound keeps them short whatever the
+/// transfer's deadline. The stop's budget counts from when it is issued, so a
+/// transfer that timed out still releases the bus.
+const BUS_LIMIT: Duration = Duration::from_millis(1);
 
 /// Byte access to the controller's registers, at the offsets above.
 pub trait Regs {
@@ -97,9 +99,14 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
         self.regs.write(I2SR, !flags)
     }
 
-    /// Waits until the bus-busy flag equals `busy`. Lost arbitration means
-    /// another master or a stuck line: an I/O error, not a retry.
+    /// Waits until the bus-busy flag equals `busy`, for at most [`BUS_LIMIT`].
+    /// Lost arbitration means another master or a stuck line: an I/O error,
+    /// not a retry.
     fn wait_bus(&mut self, busy: bool, deadline: Instant) -> Result<(), BusError> {
+        let deadline = match self.clock.now().checked_add(BUS_LIMIT) {
+            Some(limit) => limit.min(deadline),
+            None => deadline,
+        };
         loop {
             let sr = self.regs.read(I2SR);
             if sr & I2SR_IAL != 0 {
@@ -160,8 +167,7 @@ impl<R: Regs, C: Clock> ImxI2c<R, C> {
         let mut result = Ok(());
         if control & I2CR_MSTA != 0 {
             self.set_control(control & !(I2CR_MSTA | I2CR_MTX));
-            let limit = self.clock.now().checked_add(STOP_LIMIT);
-            result = self.wait_bus(false, limit.unwrap_or(Instant::from_nanos(i64::MAX)));
+            result = self.wait_bus(false, Instant::from_nanos(i64::MAX));
         }
         self.set_control(0);
         result

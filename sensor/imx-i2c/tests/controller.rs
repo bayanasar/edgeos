@@ -65,6 +65,8 @@ struct Model {
     hang: bool,
     /// Another master holds the bus.
     held: bool,
+    /// A start never takes the bus.
+    no_start: bool,
 }
 
 impl Model {
@@ -86,6 +88,7 @@ impl Model {
             violations: Vec::new(),
             hang: false,
             held: false,
+            no_start: false,
         }
     }
 
@@ -158,6 +161,9 @@ impl Model {
         }
         let (was, is) = (old & I2CR_MSTA != 0, value & I2CR_MSTA != 0);
         if !was && is {
+            if self.no_start {
+                return;
+            }
             if self.busy {
                 self.ial = true;
                 self.control &= !I2CR_MSTA;
@@ -412,6 +418,22 @@ fn a_byte_that_never_finishes_times_out_and_releases_the_bus() {
         Err(BusError::Timeout)
     );
     let _ = i2c.release();
+    assert!(model.log.is_empty());
+    assert_released(&model);
+}
+
+#[test]
+fn a_start_that_never_takes_the_bus_times_out_within_the_bus_limit() {
+    let mut model = Model::with(counter(0x50));
+    model.no_start = true;
+    let mut i2c = ImxI2c::new(&mut model, StepClock::default(), IFDR_24MHZ_100KHZ);
+    assert_eq!(
+        i2c.transfer(0x50, &[0], &mut [0], deadline()),
+        Err(BusError::Timeout)
+    );
+    let (_, clock) = i2c.release();
+    // 50 us to settle, then 1 ms of polling: far short of the deadline.
+    assert!(clock.0.get() < 2_000_000, "polled until {} ns", clock.0.get());
     assert!(model.log.is_empty());
     assert_released(&model);
 }
