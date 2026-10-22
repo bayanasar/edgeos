@@ -1,0 +1,12 @@
+[package]
+name = "pd-common"
+version = "0.1.0"
+description = "What the sensor protection domains share: channels, labels, the counter clock, the I2C client"
+edition.workspace = true
+license.workspace = true
+
+[dependencies]
+sel4-microkit.workspace = true
+sensor-core.workspace = true
+sensor-bmp280.workspace = true
+sensor-wire.workspace = true

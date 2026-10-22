@@ -1,0 +1,5 @@
+# The nightly rust-sel4 is tested with at the pinned revision.
+[toolchain]
+channel = "nightly-2026-08-21"
+components = ["rust-src"]
+profile = "minimal"

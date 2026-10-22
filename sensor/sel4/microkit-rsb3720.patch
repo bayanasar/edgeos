@@ -1,0 +1,46 @@
+Adds an rsb3720 board to Microkit 2.3.0: the imx8mp-evk kernel platform with
+the RSB-3720 overlay, user access to the virtual counter, and the loader's
+console on UART3. build.sh copies the overlay to custom_dts/rsb3720.dts and
+applies this with git apply, which skips this text.
+SPDX-License-Identifier: BSD-2-Clause (the license of the Microkit files it changes)
+
+diff --git a/build_sdk.py b/build_sdk.py
+index 3ae49ac..0af60c9 100644
+--- a/build_sdk.py
++++ b/build_sdk.py
+@@ -241,6 +241,18 @@ SUPPORTED_BOARDS = (
+             "KernelPlatform": "imx8mp-evk",
+         },
+     ),
++    BoardInfo(
++        name="rsb3720",
++        arch=KernelArch.AARCH64,
++        gcc_cpu="cortex-a53",
++        loader_link_address=0x41000000,
++        smp_cores=4,
++        kernel_options={
++            "KernelPlatform": "imx8mp-evk",
++            "KernelCustomDTSOverlay": Path("custom_dts/rsb3720.dts"),
++            "KernelArmExportVCNTUser": True,
++        },
++    ),
+     BoardInfo(
+         name="imx8mq_evk",
+         arch=KernelArch.AARCH64,
+diff --git a/loader/src/uart.c b/loader/src/uart.c
+index 0361da7..a085b7e 100644
+--- a/loader/src/uart.c
++++ b/loader/src/uart.c
+@@ -29,7 +29,12 @@ void putc(uint8_t ch)
+ 
+ #elif defined(CONFIG_PLAT_IMX8MM_EVK) || defined(CONFIG_PLAT_IMX8MP_EVK)
+ /* IMX8MP_EVK includes the iotgate, as this is the kernel platform */
++#if defined(BOARD_rsb3720)
++/* The RSB-3720's console is UART3 */
++#define UART_BASE 0x30880000
++#else
+ #define UART_BASE 0x30890000
++#endif
+ #define STAT 0x98
+ #define TRANSMIT 0x40
+ #define STAT_TDRE (1 << 14)

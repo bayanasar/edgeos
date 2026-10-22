@@ -44,6 +44,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-imx-i2c"
+version = "0.1.0"
+dependencies = [
+ "sensor-bmp280",
+ "sensor-core",
+ "sensor-fake",
+]
+
+[[package]]
 name = "sensor-linux"
 version = "0.1.0"
 dependencies = [
@@ -61,4 +70,11 @@ version = "0.1.0"
 dependencies = [
  "sensor-core",
  "sensor-fake",
+]
+
+[[package]]
+name = "sensor-wire"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
 ]

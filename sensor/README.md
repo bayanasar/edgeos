@@ -5,7 +5,9 @@ seL4 components, and against a fake bus in tests.
 
 Status: three drivers (BMP280, PCF8591, DS18B20) verified on a Raspberry Pi 5
 over Linux; the HC-SR04 driver and the GPIO transport are tested against the
-fake bus only.
+fake bus only. On seL4, the BMP280 driver and an i.MX I2C controller driver
+run in isolated Microkit domains on an RSB-3720, so far with no sensor
+connected (`sel4/README.md`).
 
 | Crate | What it is |
 |---|---|
@@ -14,7 +16,10 @@ fake bus only.
 | `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
 | `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
 | `drivers/hcsr04` (`sensor-hcsr04`) | HC-SR04 ultrasonic ranging module, two GPIO lines |
+| `imx-i2c` (`sensor-imx-i2c`) | The i.MX 8M I2C controller as a polled I2C master, over a register-access trait |
+| `wire` (`sensor-wire`) | Samples and I2C requests as 64-bit message words, for IPC in registers |
 | `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus, GPIO lines with scheduled edges |
+| `sel4/` | Microkit protection domains for the RSB-3720, in a workspace of its own on a pinned nightly |
 | `linux` (`sensor-linux`) | Linux transport (`/dev/i2c-N`, w1 netlink, GPIO character device, `CLOCK_MONOTONIC`) and the `bmp280-read`, `pcf8591-read`, `ds18b20-read`, `hcsr04-read` tools |
 
 ## `sensor-core`

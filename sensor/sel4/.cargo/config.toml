@@ -1,0 +1,12 @@
+[env]
+RUST_TARGET_PATH = { value = "support/targets", relative = true }
+
+[build]
+target = "aarch64-sel4-minimal"
+# A JSON target spec needs this on the pinned nightly.
+rustflags = ["-Zunstable-options"]
+
+[unstable]
+unstable-options = true
+build-std = ["core", "alloc", "compiler_builtins"]
+build-std-features = ["compiler-builtins-mem"]
