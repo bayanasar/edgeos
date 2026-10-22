@@ -432,13 +432,28 @@ fn a_bus_held_by_another_master_is_an_io_error() {
 }
 
 #[test]
+fn the_first_and_last_unreserved_addresses_reach_the_bus() {
+    for addr in [0x08, 0x77] {
+        let mut model = Model::with(counter(addr));
+        let mut i2c = ImxI2c::new(&mut model, StepClock::default(), IFDR_24MHZ_100KHZ);
+        assert_eq!(i2c.transfer(addr, &[0], &mut [0], deadline()), Ok(()));
+        let _ = i2c.release();
+        assert_eq!(model.log.len(), 1, "address {addr:#x}");
+        assert_released(&model);
+    }
+}
+
+#[test]
 fn bad_arguments_touch_no_register() {
     let mut model = Model::with(counter(0x50));
     let mut i2c = ImxI2c::new(&mut model, StepClock::default(), IFDR_24MHZ_100KHZ);
-    assert_eq!(
-        i2c.transfer(0x80, &[0], &mut [], deadline()),
-        Err(BusError::Invalid)
-    );
+    for addr in [0x00, 0x07, 0x78, 0x7f, 0x80] {
+        assert_eq!(
+            i2c.transfer(addr, &[0], &mut [], deadline()),
+            Err(BusError::Invalid),
+            "address {addr:#x}"
+        );
+    }
     assert_eq!(
         i2c.transfer(0x50, &[], &mut [], deadline()),
         Err(BusError::Invalid)

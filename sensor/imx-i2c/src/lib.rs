@@ -230,7 +230,10 @@ impl<R: Regs, C: Clock> I2c for ImxI2c<R, C> {
         read: &mut [u8],
         deadline: Instant,
     ) -> Result<(), BusError> {
-        if addr > 0x7f || (write.is_empty() && read.is_empty()) {
+        // 7-bit addresses 0x00 to 0x07 and 0x78 to 0x7f are reserved: general
+        // call, start byte, CBUS, high-speed mode and 10-bit addressing
+        // (I2C-bus specification UM10204, section 3.1.12).
+        if !(0x08..=0x77).contains(&addr) || (write.is_empty() && read.is_empty()) {
             return Err(BusError::Invalid);
         }
         let result = self
