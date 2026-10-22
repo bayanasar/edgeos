@@ -1,0 +1,13 @@
+// SPDX-License-Identifier: BSD-3-Clause
+// QEMU boots a kernel above 4 GiB of RAM only with a device tree; the
+// Microkit loader ignores it.
+/dts-v1/;
+/ {
+    #address-cells = <2>;
+    #size-cells = <2>;
+    chosen { };
+    memory@40000000 {
+        device_type = "memory";
+        reg = <0x0 0x40000000 0x1 0x80000000>;
+    };
+};
