@@ -1,0 +1,16 @@
+[package]
+name = "pd-consumer"
+version = "0.1.0"
+description = "Reads samples from the BMP280 domain and reports them"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "consumer"
+path = "src/main.rs"
+
+[dependencies]
+pd-common.workspace = true
+sel4-microkit.workspace = true
+sensor-core.workspace = true
+sensor-wire.workspace = true

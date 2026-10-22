@@ -1,0 +1,17 @@
+[package]
+name = "pd-i2c-imx"
+version = "0.1.0"
+description = "The i.MX I2C controller in a domain of its own: its registers and nothing else"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "i2c-imx"
+path = "src/main.rs"
+
+[dependencies]
+pd-common.workspace = true
+sel4-microkit.workspace = true
+sensor-core.workspace = true
+sensor-wire.workspace = true
+sensor-imx-i2c.workspace = true

@@ -1,0 +1,17 @@
+[package]
+name = "pd-bmp280"
+version = "0.1.0"
+description = "The BMP280 driver with no device access: I2C through the controller domain"
+edition.workspace = true
+license.workspace = true
+
+[[bin]]
+name = "bmp280"
+path = "src/main.rs"
+
+[dependencies]
+pd-common.workspace = true
+sel4-microkit.workspace = true
+sensor-core.workspace = true
+sensor-wire.workspace = true
+sensor-bmp280.workspace = true

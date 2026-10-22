@@ -1,0 +1,36 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!-- SPDX-License-Identifier: BSD-3-Clause -->
+<!--
+  A BMP280 on the RSB-3720's I2C4, which the board routes to the UIO2
+  header (pin 16 SDA, pin 18 SCL). Only i2c_imx maps the controller's
+  registers; bmp280 maps no device and reaches the bus through i2c_imx;
+  consumer sees only samples. Every call goes to a strictly higher priority.
+  The boot loader leaves the controller clocked; its pads must be muxed to
+  I2C before the image starts.
+-->
+<system>
+    <memory_region name="i2c4_regs" size="0x1000" phys_addr="0x30a50000" />
+
+    <protection_domain name="i2c_imx" priority="254">
+        <program_image path="i2c-imx.elf" />
+        <map mr="i2c4_regs" vaddr="0x2000000" perms="rw" cached="false" setvar_vaddr="i2c_regs" />
+    </protection_domain>
+
+    <protection_domain name="bmp280" priority="200">
+        <program_image path="bmp280.elf" />
+    </protection_domain>
+
+    <protection_domain name="consumer" priority="100">
+        <program_image path="consumer.elf" />
+    </protection_domain>
+
+    <channel>
+        <end pd="bmp280" id="0" pp="true" />
+        <end pd="i2c_imx" id="0" />
+    </channel>
+
+    <channel>
+        <end pd="consumer" id="0" pp="true" />
+        <end pd="bmp280" id="1" />
+    </channel>
+</system>
