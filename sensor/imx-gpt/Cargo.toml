@@ -1,0 +1,10 @@
+[package]
+name = "sensor-imx-gpt"
+version = "0.1.0"
+description = "i.MX 8M general-purpose timer as a one-shot timeout source"
+edition.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+sensor-core = { path = "../core" }
