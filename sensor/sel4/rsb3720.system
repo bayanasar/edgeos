@@ -8,6 +8,13 @@
   i2c_imx; consumer sees only samples. Every call goes to a strictly higher
   priority. The boot loader leaves the controller clocked; its pads must be
   muxed to I2C, and GPT1 clocked, before the image starts.
+
+  i2c_imx and timer each serve exactly one client: one channel only may
+  have its pp="true" end calling each. i2c_imx blocks inside the call it is
+  serving, so a second domain calling it would be left inactive, with no
+  fault and nothing logged; timer keeps one deadline and signals one
+  channel. Another client needs a bus multiplexer in front of i2c_imx (or,
+  for timer, another of GPT1's compares) first.
 -->
 <system>
     <memory_region name="i2c4_regs" size="0x1000" phys_addr="0x30a50000" />
