@@ -71,8 +71,12 @@ check() { # log pattern what
 status=0
 check empty.log 'SENSOR_RESULT: samples=0 nak=0 timeout=5 other=0 of 5' \
     'empty bus: every transfer ends in the timer domain'"'"'s timeout'
+check empty.log 'I2C_WAITS: transfers=5 irq=0 timer=[1-9][0-9]* polled=0' \
+    'empty bus: the timer, not the controller, ended every wait'
 check bmp280.log 'SENSOR_RESULT: samples=5 nak=0 timeout=0 other=0 of 5' \
     'BMP280 registers on the bus: 5 samples'
 check bmp280.log 'pressure 100526390e-3 Pa temperature 3106e-2 C' \
     'the values the host tests compute from the same registers'
+check bmp280.log 'I2C_WAITS: transfers=20 irq=0 timer=0 polled=0' \
+    'BMP280 registers on the bus: no byte was waited for'
 exit $status

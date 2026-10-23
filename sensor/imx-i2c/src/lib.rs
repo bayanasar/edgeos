@@ -129,6 +129,11 @@ impl<R: Regs, C: Clock, W: Wait> ImxI2c<R, C, W> {
         }
     }
 
+    /// The waiter, for whatever it keeps count of.
+    pub fn waiter(&self) -> &W {
+        &self.wait
+    }
+
     pub fn release(self) -> (R, C) {
         (self.regs, self.clock)
     }

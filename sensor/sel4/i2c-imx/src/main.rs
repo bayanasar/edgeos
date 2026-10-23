@@ -13,8 +13,8 @@ use core::ptr::NonNull;
 use core::time::Duration;
 
 use pd_common::{
-    CounterClock, ERR_REQUEST, I2C_FROM_BMP280, I2C_IRQ, I2C_TO_TIMER, OP_I2C_TRANSFER, Timeout,
-    TimerClient,
+    CounterClock, ERR_REQUEST, I2C_FROM_BMP280, I2C_IRQ, I2C_TO_TIMER, OP_I2C_REPORT,
+    OP_I2C_TRANSFER, Timeout, TimerClient,
 };
 use sel4_microkit::{
     Channel, ChannelSet, Handler, Infallible, MessageInfo, debug_println, memory_region_symbol,
@@ -30,8 +30,9 @@ use sensor_wire::{MAX_READ, REPLY_WORDS, REQUEST_WORDS, pack, request_from_words
 /// 100 kHz.
 const TRANSFER_CAP: Duration = Duration::from_millis(100);
 
-/// This domain's endpoint, where Microkit's event loop receives (the slot is
-/// Microkit's `INPUT_CAP`).
+/// This domain's endpoint, where Microkit's event loop receives: the slot of
+/// Microkit's `INPUT_CAP`, which neither the SDK nor `sel4-microkit`
+/// exports. `build.sh` checks that both still put it in slot 1.
 const INPUT: sel4::cap::Endpoint = sel4::Cap::from_bits(1);
 
 /// `seL4_Wait` on [`INPUT`]: returns the badge of the notifications that
@@ -54,11 +55,41 @@ fn wait_input() -> sel4::Badge {
 /// domain, not a second channel into it.
 struct IrqWait {
     timer: TimerClient,
-    /// The deadline the timer holds for us.
-    armed: Option<Instant>,
+    deadline: Deadline,
     /// The interrupt was delivered and is masked until acknowledged, which
     /// waits until the driver has cleared the flag that raised it.
     ack_pending: bool,
+    counts: Counts,
+}
+
+/// What the timer's domain said about the deadline last sent to it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Deadline {
+    /// None since the last transfer, or its signal has come.
+    Unset,
+    /// A signal will come at this deadline.
+    Armed(Instant),
+    /// The timer's clock had passed this deadline, a tick or so before
+    /// ours: the driver polls the rest of the way, without asking again.
+    Passed(Instant),
+    /// The timer does not count. The timer's domain decides that once, at
+    /// its start, so the driver polls from then on without asking again.
+    Stopped,
+}
+
+/// How each wait ended, so a run shows which path it took. A byte that
+/// completed before the driver looked at the status is not waited for, and
+/// not counted.
+#[derive(Default)]
+struct Counts {
+    /// Woken by the controller's interrupt.
+    irq: u32,
+    /// Woken by the timer's signal: the deadline, or an early signal that
+    /// the clock overrules.
+    timer: u32,
+    /// Returned without blocking, for the driver to poll, because the timer
+    /// could not help.
+    polled: u32,
 }
 
 impl IrqWait {
@@ -67,6 +98,12 @@ impl IrqWait {
             I2C_IRQ.irq_ack().unwrap();
             self.ack_pending = false;
         }
+    }
+
+    /// Lets the driver look at the status again, without blocking.
+    fn poll(&mut self) -> Result<(), BusError> {
+        self.counts.polled += 1;
+        Ok(())
     }
 }
 
@@ -79,21 +116,30 @@ impl Wait for IrqWait {
             if clock.now() >= deadline {
                 return Err(BusError::Timeout);
             }
-            if self.armed != Some(deadline) {
-                match self.timer.set(deadline) {
-                    Timeout::Armed => self.armed = Some(deadline),
-                    // The timer's clock disagrees by a tick, or it cannot
-                    // count: let the driver look at the status again, and
-                    // poll until the deadline.
-                    Timeout::Passed | Timeout::Stopped => return Ok(()),
-                }
+            match self.deadline {
+                Deadline::Armed(d) if d == deadline => {}
+                Deadline::Passed(d) if d == deadline => return self.poll(),
+                Deadline::Stopped => return self.poll(),
+                _ => match self.timer.set(deadline) {
+                    Timeout::Armed => self.deadline = Deadline::Armed(deadline),
+                    Timeout::Passed => {
+                        self.deadline = Deadline::Passed(deadline);
+                        return self.poll();
+                    }
+                    Timeout::Stopped => {
+                        self.deadline = Deadline::Stopped;
+                        return self.poll();
+                    }
+                },
             }
             let badge = wait_input();
             if badge & (1 << I2C_TO_TIMER.index()) != 0 {
+                self.counts.timer += 1;
                 // Possibly a deadline already cancelled; the clock decides.
-                self.armed = None;
+                self.deadline = Deadline::Unset;
             }
             if badge & (1 << I2C_IRQ.index()) != 0 {
+                self.counts.irq += 1;
                 self.ack_pending = true;
                 return Ok(());
             }
@@ -102,9 +148,12 @@ impl Wait for IrqWait {
 
     fn finish(&mut self) {
         self.ack();
-        if self.armed.take().is_some() {
-            self.timer.cancel();
+        match self.deadline {
+            Deadline::Armed(_) => self.timer.cancel(),
+            Deadline::Stopped => return,
+            _ => {}
         }
+        self.deadline = Deadline::Unset;
     }
 }
 
@@ -136,18 +185,35 @@ fn init() -> HandlerImpl {
     );
     let wait = IrqWait {
         timer: TimerClient::new(I2C_TO_TIMER),
-        armed: None,
+        deadline: Deadline::Unset,
         ack_pending: false,
+        counts: Counts::default(),
     };
     HandlerImpl {
         i2c: ImxI2c::with_wait(regs, clock, IFDR_24MHZ_100KHZ, wait),
         clock,
+        transfers: 0,
     }
 }
 
 struct HandlerImpl {
     i2c: ImxI2c<Mmio, CounterClock, IrqWait>,
     clock: CounterClock,
+    transfers: u32,
+}
+
+impl HandlerImpl {
+    /// Prints the transfers so far and how their waits ended.
+    fn report(&self) {
+        let c = &self.i2c.waiter().counts;
+        debug_println!(
+            "I2C_WAITS: transfers={} irq={} timer={} polled={}",
+            self.transfers,
+            c.irq,
+            c.timer,
+            c.polled
+        );
+    }
 }
 
 impl Handler for HandlerImpl {
@@ -159,6 +225,10 @@ impl Handler for HandlerImpl {
         msg_info: MessageInfo,
     ) -> Result<MessageInfo, Self::Error> {
         let n = msg_info.count();
+        if channel == I2C_FROM_BMP280 && msg_info.label() == OP_I2C_REPORT && n == 0 {
+            self.report();
+            return Ok(MessageInfo::new(0, 0));
+        }
         if channel != I2C_FROM_BMP280 || msg_info.label() != OP_I2C_TRANSFER || n > REQUEST_WORDS {
             return Ok(MessageInfo::new(ERR_REQUEST, 0));
         }
@@ -173,6 +243,7 @@ impl Handler for HandlerImpl {
         let mut buf = [0u8; MAX_READ];
         let read = &mut buf[..req.read_len];
         let result = self.i2c.transfer(req.addr, req.write(), read, deadline);
+        self.transfers += 1;
         if result.is_err() {
             return Ok(MessageInfo::new(status_label(result), 0));
         }

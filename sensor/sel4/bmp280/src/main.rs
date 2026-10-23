@@ -7,8 +7,8 @@
 #![no_main]
 
 use pd_common::{
-    BMP280_FROM_CONSUMER, BMP280_TO_I2C, CounterClock, ERR_REQUEST, I2cClient, OP_READ_SAMPLE,
-    sample_status,
+    BMP280_FROM_CONSUMER, BMP280_TO_I2C, CounterClock, ERR_REQUEST, I2cClient, OP_I2C_REPORT,
+    OP_READ_SAMPLE, OP_REPORT, sample_status,
 };
 use sel4_microkit::{
     Channel, Handler, Infallible, MessageInfo, debug_println, protection_domain, with_msg_regs_mut,
@@ -46,8 +46,16 @@ impl Handler for HandlerImpl {
         channel: Channel,
         msg_info: MessageInfo,
     ) -> Result<MessageInfo, Self::Error> {
-        if channel != BMP280_FROM_CONSUMER || msg_info.label() != OP_READ_SAMPLE {
+        if channel != BMP280_FROM_CONSUMER {
             return Ok(MessageInfo::new(ERR_REQUEST, 0));
+        }
+        match msg_info.label() {
+            OP_READ_SAMPLE => {}
+            OP_REPORT => {
+                let reply = BMP280_TO_I2C.pp_call(MessageInfo::new(OP_I2C_REPORT, 0));
+                return Ok(MessageInfo::new(reply.label(), 0));
+            }
+            _ => return Ok(MessageInfo::new(ERR_REQUEST, 0)),
         }
         // Initialise on demand, so a sensor connected later is found by the
         // next request.

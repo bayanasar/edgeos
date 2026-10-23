@@ -34,6 +34,14 @@ pub const OP_I2C_TRANSFER: u64 = 1;
 /// Label of a request for one sample; the reply's label is
 /// [`sample_status`].
 pub const OP_READ_SAMPLE: u64 = 1;
+/// Label of a request that the controller's domain print how its waits have
+/// ended (`I2C_WAITS:`); the reply is empty. Printing at 115200 baud takes
+/// about 87 us a character, so it is asked for once, after the timed
+/// requests, not done in each transfer.
+pub const OP_I2C_REPORT: u64 = 2;
+/// Label of a request that the BMP280 domain pass [`OP_I2C_REPORT`] on to the
+/// controller's domain; the reply is empty.
+pub const OP_REPORT: u64 = 2;
 /// Label of a request for a signal at a deadline, in nanoseconds of
 /// [`CounterClock`] in the first word. It replaces any earlier deadline.
 pub const OP_TIMEOUT_SET: u64 = 2;
