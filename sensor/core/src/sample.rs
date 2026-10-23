@@ -4,7 +4,8 @@
 //! Records hold no pointers and no padding, so they can be copied into a
 //! shared ring buffer and read by a component that does not trust the
 //! producer. Consumers still bounds-check every field: [`Sample::channels`]
-//! refuses a channel count above [`MAX_CHANNELS`], and registry values a
+//! refuses a channel count above [`MAX_CHANNELS`], [`Channel::exp`] an
+//! exponent outside [`EXP_MIN`] to [`EXP_MAX`], and registry values a
 //! consumer does not know decode to `None`. No floating point: a scaled value
 //! is `value * 10^exp` in `unit`.
 //!
@@ -16,6 +17,10 @@ use crate::bus::{Instant, TsSource};
 pub const MAX_CHANNELS: usize = 8;
 pub const SAMPLE_SIZE: usize = 128;
 pub const EVENT_SIZE: usize = 32;
+/// The decimal exponents a channel may carry: nano to unit. A consumer can
+/// size its arithmetic for `10^-EXP_MIN` and refuse anything else.
+pub const EXP_MIN: i8 = -9;
+pub const EXP_MAX: i8 = 0;
 
 /// What a sample measures. Append-only registry: never renumber.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -141,6 +146,13 @@ pub struct Channel {
     pub unit: u16,
     pub exp: i8,
     pub reserved: u8,
+}
+
+impl Channel {
+    /// The decimal exponent, or `None` outside [`EXP_MIN`] to [`EXP_MAX`].
+    pub fn exp(&self) -> Option<i8> {
+        (EXP_MIN..=EXP_MAX).contains(&self.exp).then_some(self.exp)
+    }
 }
 
 /// One reading of up to [`MAX_CHANNELS`] quantities.
@@ -464,6 +476,23 @@ mod tests {
         assert_eq!(s.channels(), None);
         s.nchannels = 255;
         assert_eq!(Sample::from_ne_bytes(&s.to_ne_bytes()).channels(), None);
+    }
+
+    #[test]
+    fn exponent_is_bounds_checked() {
+        let mut c = sample().ch[0];
+        assert_eq!(c.exp(), Some(-3));
+        for (exp, ok) in [
+            (-10, false),
+            (-9, true),
+            (0, true),
+            (1, false),
+            (i8::MIN, false),
+            (i8::MAX, false),
+        ] {
+            c.exp = exp;
+            assert_eq!(c.exp(), ok.then_some(exp), "exp {exp}");
+        }
     }
 
     #[test]
