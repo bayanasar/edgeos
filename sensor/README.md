@@ -16,7 +16,8 @@ connected (`sel4/README.md`).
 | `drivers/pcf8591` (`sensor-pcf8591`) | NXP PCF8591 four-input 8-bit ADC, I2C |
 | `drivers/ds18b20` (`sensor-ds18b20`) | Maxim DS18B20 thermometer, 1-Wire |
 | `drivers/hcsr04` (`sensor-hcsr04`) | HC-SR04 ultrasonic ranging module, two GPIO lines |
-| `imx-i2c` (`sensor-imx-i2c`) | The i.MX 8M I2C controller as a polled I2C master, over a register-access trait |
+| `imx-i2c` (`sensor-imx-i2c`) | The i.MX 8M I2C controller as an I2C master, polled or interrupt-driven, over a register-access trait |
+| `imx-gpt` (`sensor-imx-gpt`) | The i.MX 8M general-purpose timer as a one-shot timeout source, its rate measured against a clock |
 | `wire` (`sensor-wire`) | Samples and I2C requests as 64-bit message words, for IPC in registers |
 | `fake` (`sensor-fake`) | Fake clock, I2C bus with pluggable device models, 1-Wire bus, GPIO lines with scheduled edges |
 | `sel4/` | Microkit protection domains for the RSB-3720, in a workspace of its own on a pinned nightly |

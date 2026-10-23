@@ -44,6 +44,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "sensor-imx-gpt"
+version = "0.1.0"
+dependencies = [
+ "sensor-core",
+]
+
+[[package]]
 name = "sensor-imx-i2c"
 version = "0.1.0"
 dependencies = [

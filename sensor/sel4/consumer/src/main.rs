@@ -1,13 +1,14 @@
 // SPDX-License-Identifier: BSD-3-Clause
-//! Asks the BMP280 domain for samples and reports each one, then a summary
-//! line a test harness can match.
+//! Asks the BMP280 domain for samples and reports each one, then has the
+//! controller's domain report its waits, then prints a summary line a test
+//! harness can match.
 
 #![no_std]
 #![no_main]
 
 use core::time::Duration;
 
-use pd_common::{CONSUMER_TO_BMP280, CounterClock, OP_READ_SAMPLE};
+use pd_common::{CONSUMER_TO_BMP280, CounterClock, OP_READ_SAMPLE, OP_REPORT};
 use sel4_microkit::{MessageInfo, NullHandler, debug_println, protection_domain, with_msg_regs};
 use sensor_core::bus::Clock;
 use sensor_wire::{SAMPLE_WORDS, sample_from_words};
@@ -60,6 +61,9 @@ fn init() -> NullHandler {
             clock.sleep_until(t);
         }
     }
+    // The controller's domain prints how its waits ended, outside the
+    // timed requests.
+    CONSUMER_TO_BMP280.pp_call(MessageInfo::new(OP_REPORT, 0));
     debug_println!(
         "SENSOR_RESULT: samples={samples} nak={nak} timeout={timeout} other={other} of {REQUESTS}"
     );

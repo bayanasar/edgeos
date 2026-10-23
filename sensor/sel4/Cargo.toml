@@ -3,7 +3,7 @@
 # nightly, while the portable crates one level up build on stable.
 [workspace]
 resolver = "3"
-members = ["common", "i2c-imx", "bmp280", "consumer"]
+members = ["common", "timer", "i2c-imx", "bmp280", "consumer"]
 
 [workspace.package]
 edition = "2024"
@@ -11,8 +11,10 @@ license = "BSD-3-Clause"
 
 [workspace.dependencies]
 sel4-microkit = { git = "https://github.com/seL4/rust-sel4", rev = "86a0dbf4f53e6766734331c5df61851489ed38a1", default-features = false }
+sel4 = { git = "https://github.com/seL4/rust-sel4", rev = "86a0dbf4f53e6766734331c5df61851489ed38a1", default-features = false }
 sensor-core = { path = "../core" }
 sensor-bmp280 = { path = "../drivers/bmp280" }
+sensor-imx-gpt = { path = "../imx-gpt" }
 sensor-imx-i2c = { path = "../imx-i2c" }
 sensor-wire = { path = "../wire" }
 pd-common = { path = "common" }
