@@ -14,7 +14,7 @@ use core::time::Duration;
 
 use pd_common::{
     CounterClock, ERR_REQUEST, I2C_FROM_BMP280, I2C_IRQ, I2C_TO_TIMER, OP_I2C_REPORT,
-    OP_I2C_TRANSFER, Timeout, TimerClient,
+    OP_I2C_TRANSFER, Timeout, TimerClient, wait_input,
 };
 use sel4_microkit::{
     Channel, ChannelSet, Handler, Infallible, MessageInfo, debug_println, memory_region_symbol,
@@ -30,29 +30,11 @@ use sensor_wire::{MAX_READ, REPLY_WORDS, REQUEST_WORDS, pack, request_from_words
 /// 100 kHz.
 const TRANSFER_CAP: Duration = Duration::from_millis(100);
 
-/// This domain's endpoint, where Microkit's event loop receives: the slot of
-/// Microkit's `INPUT_CAP`, which neither the SDK nor `sel4-microkit`
-/// exports. `build.sh` checks that both still put it in slot 1.
-const INPUT: sel4::cap::Endpoint = sel4::Cap::from_bits(1);
-
-/// `seL4_Wait` on [`INPUT`]: returns the badge of the notifications that
-/// woke it. The `sel4` crate offers `wait` on notification capabilities
-/// only, but the kernel takes an endpoint as well (`handleRecv` without a
-/// reply object), which is what is wanted here.
-fn wait_input() -> sel4::Badge {
-    INPUT.cast::<sel4::cap_type::Notification>().wait().1
-}
-
-/// Blocks on [`INPUT`] for the controller's interrupt or the timer's signal.
-///
-/// A protected procedure cannot return to Microkit's event loop to wait, so
-/// it waits on the endpoint itself, with `seL4_Wait`: no reply object, so the
-/// reply owed to the caller is kept, and the notifications bound to the
-/// domain still arrive. This is sound only because the domain has one
-/// client, blocked in the call being served: a call arriving now would find
-/// no reply object and its caller would be left inactive (seL4's
-/// `sendIPC`). A second client needs a bus multiplexer in front of this
-/// domain, not a second channel into it.
+/// Blocks with [`wait_input`] for the controller's interrupt or the timer's
+/// signal, inside the protected procedure that serves a transfer. That is
+/// sound only because the domain has one client, blocked in the call being
+/// served (see [`wait_input`]). A second client needs a bus multiplexer in
+/// front of this domain, not a second channel into it.
 struct IrqWait {
     timer: TimerClient,
     deadline: Deadline,

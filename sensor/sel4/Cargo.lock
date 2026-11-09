@@ -206,6 +206,7 @@ dependencies = [
 name = "pd-common"
 version = "0.1.0"
 dependencies = [
+ "sel4",
  "sel4-microkit",
  "sensor-bmp280",
  "sensor-core",
@@ -227,7 +228,6 @@ name = "pd-i2c-imx"
 version = "0.1.0"
 dependencies = [
  "pd-common",
- "sel4",
  "sel4-microkit",
  "sensor-core",
  "sensor-imx-i2c",

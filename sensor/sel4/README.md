@@ -4,7 +4,7 @@ The sensor stack on seL4: a timer, an I2C controller driver, the BMP280
 driver and a consumer, each in a Microkit protection domain of its own, for
 the Advantech RSB-3720 (NXP i.MX 8M Plus).
 
-Status: interrupt-driven, with a timer domain for deadlines; passes in QEMU's imx8mp-evk (`qemu.sh`) and on the board with no sensor connected · Updated: 2026-10-22
+Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's conversions; passes in QEMU's imx8mp-evk (`qemu.sh`); not yet run on the board, where the version before it ran with no sensor connected · Updated: 2026-11-08
 
 ## Four domains
 
@@ -12,13 +12,16 @@ Status: interrupt-driven, with a timer domain for deadlines; passes in QEMU's im
 |---|---|---|---|
 | `timer` | 254 | GPT1's register page at `0x302d0000`, uncached, and its interrupt (SPI 55) | nothing |
 | `i2c_imx` | 253 | I2C4's register page at `0x30a50000`, uncached, and its interrupt (SPI 38) | `timer`, to set and cancel a deadline |
-| `bmp280` | 200 | no device | `i2c_imx`, once per transfer, and once to pass on the request for counts |
-| `consumer` | 100 | nothing | `bmp280`, once per sample, and once for `i2c_imx`'s counts |
+| `bmp280` | 200 | no device | `i2c_imx`, once per transfer, and once to pass on the request for counts; `timer`, to set the end of each sleep |
+| `consumer` | 100 | nothing | `bmp280`, once per sample, and once for the counts of `bmp280` and `i2c_imx` |
 
-- `timer` runs `sensor-imx-gpt`. Its one client asks for a signal at a
-  deadline on the shared counter clock; the domain arms the timer's compare
-  and signals the client when it matches. It measures the timer's rate
-  against the counter at start, spinning for 1 ms.
+- `timer` runs `sensor-imx-gpt`. Each client has one of GPT1's three
+  compares, `i2c_imx` the first and `bmp280` the second, and asks for a
+  signal at a deadline on the shared counter clock; the domain arms that
+  compare and signals that client when it matches. It never blocks in a
+  call, so it can serve both. It measures the timer's rate against the
+  counter at start, spinning for 1 ms, with each counter read timed from
+  both sides so the read's own time does not skew the rate.
 - `i2c_imx` runs `sensor-imx-i2c` on the mapped page, with an
   interrupt-driven waiter. It cannot reach pin multiplexing, clocks or any
   other device. While a byte is on the bus it blocks until the controller
@@ -40,25 +43,34 @@ Status: interrupt-driven, with a timer domain for deadlines; passes in QEMU's im
   deadline already cancelled, after which the wait asks again. A byte
   already complete when the driver first looks is not waited for and not
   counted, so `irq` above 0 is what shows the interrupt path was taken.
-- `i2c_imx` now depends on `timer` to end every wait: if GPT1 stopped
-  counting after its rate was measured, or its interrupt were lost, a wait
-  would never end, with no fault and nothing logged, and `bmp280` and
-  `consumer` would stay blocked in their calls. The polled version always
-  ended in a timeout.
-- Inside a protected procedure `i2c_imx` cannot return to Microkit's event
-  loop, so it blocks with `seL4_Wait` on its own endpoint, which keeps the
-  reply owed to its caller and still receives its notifications. That is
-  sound only with one client, blocked in the call being served: a second
-  client calling in would find no reply object. More clients need a bus
-  multiplexer in front of the domain.
+- `i2c_imx` and `bmp280` now depend on `timer` to end every wait and every
+  sleep: if GPT1 stopped counting after its rate was measured, or its
+  interrupt were lost, a wait or a sleep would never end, with no fault and
+  nothing logged, and the domains below would stay blocked in their calls.
+  The polled version always ended in a timeout.
+- Inside a protected procedure `i2c_imx` and `bmp280` cannot return to
+  Microkit's event loop, so they block with `seL4_Wait` on their own
+  endpoint (`wait_input` in `common`), which keeps the reply owed to the
+  caller and still receives the domain's notifications. That is sound only
+  with one client, blocked in the call being served: a second client
+  calling in would find no reply object. More clients of `i2c_imx` need a
+  bus multiplexer in front of it.
 - `bmp280` runs `sensor-bmp280` unchanged, over an `I2c` that calls
   `i2c_imx`. The bytes are copied both ways in message registers
-  (`sensor-wire`): at most 16 written and 32 read per transfer.
+  (`sensor-wire`): at most 16 written and 32 read per transfer. Its
+  sleeps, 2 ms after a reset, 5.5 ms for each conversion and 1 ms between
+  status polls, block: each asks `timer` for a signal at its end and waits
+  for it, so lower priorities run in the meantime. It counts how they end:
+  woken by the timer's signal at the end (`timer`), signals the counter
+  clock overrules (`early`, after which it asks again), and sleeps spun to
+  the end because the timer could not help (`spun`).
 - `consumer` asks for 5 samples, 500 ms apart, and prints each with how
-  long it took. Then it asks, through `bmp280`, for `i2c_imx`'s counts,
-  which `i2c_imx` prints as
-  `I2C_WAITS: transfers=... irq=... expired=... early=... polled=...`, and
-  prints a summary:
+  long it took. It spins between them: at the lowest priority it keeps no
+  one else waiting. Then it asks `bmp280` for the counts, which `bmp280`
+  prints as `BMP280_SLEEPS: timer=... early=... spun=...` and passes on to
+  `i2c_imx`, which prints
+  `I2C_WAITS: transfers=... irq=... expired=... early=... polled=...`; and
+  it prints a summary:
   `SENSOR_RESULT: samples=... nak=... timeout=... other=... of 5`.
   The counts wait until the end because a line at 115200 baud takes about
   4 ms to print, which would swamp the timing of a transfer.
@@ -99,12 +111,13 @@ bash qemu.sh /tmp/sensor-work          # after build.sh image
 
 Runs the image on QEMU's `imx8mp-evk` twice, with I2C4 empty and with a
 BMP280's registers on it, and checks the consumer's summary and the
-controller domain's wait counts. `qemu.sh`
-says where QEMU's machine differs from the board: it needs a stub in place
-of the secure firmware's interrupt setup, its I2C controller completes
-bytes at once and does not flag a refused address, and its timer runs at a
-different rate. So QEMU checks the domains, the calls between them, the
-copy of every byte and the timer domain's timeouts; it cannot check the
+counts of the controller domain's waits and the BMP280 domain's sleeps.
+`qemu.sh` says where QEMU's machine differs from the board: it needs a
+stub in place of the secure firmware's interrupt setup, its I2C controller
+completes bytes at once and does not flag a refused address, and its timer
+runs at a different rate. So QEMU checks the domains, the calls between
+them, the copy of every byte, the timer domain's timeouts and the BMP280
+domain's sleeps on the timer's second compare; it cannot check the
 controller domain being woken by its own interrupt.
 
 ## Run on the RSB-3720
@@ -171,6 +184,7 @@ not they are muxed. A sensor on the bus will.
 - A transfer ended by the timer's deadline on the board; QEMU covers it.
 - Pins and clocks set by a component of the system rather than the boot
   loader.
-- More than one client of the controller or the timer.
-- The BMP280 domain's wait for a conversion, which still spins.
+- More than one client of the controller, or a third of the timer.
+- The BMP280 domain's sleeps on the board: without a sensor the chip never
+  answers, so the driver never sleeps. QEMU covers them.
 - A release build of the kernel and domains.
