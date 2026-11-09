@@ -121,10 +121,10 @@ impl Clock for CounterClock {
         Instant::from_nanos(ns as i64)
     }
 
-    /// Spins. i2c_imx spins only for the controller's short settling waits
-    /// and blocks for the rest; bmp280 sleeps through the timer's domain
-    /// instead; the consumer, at the lowest priority, keeps no one else
-    /// waiting while it spins.
+    /// Spins. i2c_imx sleeps on it only for the controller's 50 us settling
+    /// time; bmp280 only for what is left of a sleep the timer cannot signal
+    /// (its end already passed, or the timer not counting); the consumer at
+    /// the lowest priority, between requests, keeps no one else waiting.
     fn sleep_until(&self, t: Instant) {
         while self.now() < t {
             core::hint::spin_loop();

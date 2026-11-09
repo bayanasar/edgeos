@@ -15,8 +15,12 @@
   no fault and nothing logged. Another client of i2c_imx needs a bus
   multiplexer in front of it first. timer never blocks in a call and gives
   each client one of GPT1's three compares: i2c_imx the first, bmp280 the
-  second. A third client may have the third compare; a fourth needs another
-  timer.
+  second. A third client may have the third compare, but a channel here is
+  not enough: timer's CLIENTS table needs an entry for it, and common its
+  channel constants. Without them timer answers its calls with ERR_REQUEST,
+  which the client's TimerClient takes for a timer that does not count, so
+  the client would spin or poll with nothing logged. A fourth client needs
+  another timer.
 -->
 <system>
     <memory_region name="i2c4_regs" size="0x1000" phys_addr="0x30a50000" />

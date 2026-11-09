@@ -50,8 +50,11 @@ struct Model {
     seen: [u32; 3],
     /// Whether the timer's clock is gated off.
     gated: bool,
-    /// Time each read of the counter takes.
+    /// Time each read of the counter takes, after it samples the counter.
     skid: Rc<Cell<Duration>>,
+    /// Time each register write takes, after it lands: the counter moves on,
+    /// and a compare can match, between one write and the next.
+    write_time: Rc<Cell<Duration>>,
     /// What IR was last written as, readable after the model has moved.
     ir_out: Rc<Cell<u32>>,
     writes: Vec<(usize, u32)>,
@@ -70,6 +73,7 @@ impl Model {
             seen: [0; 3],
             gated: false,
             skid: Rc::new(Cell::new(Duration::ZERO)),
+            write_time: Rc::new(Cell::new(Duration::ZERO)),
             ir_out: Rc::new(Cell::new(0)),
             writes: Vec::new(),
         }
@@ -161,6 +165,7 @@ impl Regs for Model {
             }
             _ => panic!("write of offset {offset:#x}"),
         }
+        self.clock.advance(self.write_time.get());
     }
 }
 
@@ -276,26 +281,61 @@ fn a_compare_across_the_counters_wrap_expires() {
 
 #[test]
 fn a_match_of_the_old_compare_does_not_expire_the_new_one() {
+    // Re-armed at every lead from 0 to 40 us before the old compare, once
+    // with each register write taking 10 us and once with each counter read
+    // taking 10 us, so that for some leads the old value matches while the
+    // new one is being set: between two of the writes, or during the read.
+    let slow_writes = (Duration::ZERO, Duration::from_micros(10));
+    let slow_reads = (Duration::from_micros(10), Duration::ZERO);
+    for (read, write) in [slow_writes, slow_reads] {
+        for lead in 0..=40 {
+            let clock = Rc::new(StepClock::default());
+            let model = Model::new(clock.clone());
+            let (skid, write_time) = (model.skid.clone(), model.write_time.clone());
+            let mut gpt = ImxGpt::start(model);
+            gpt.calibrate(&*clock, Duration::from_millis(1)).unwrap();
+            let ticks = gpt.ticks_for(Duration::from_millis(1));
+            assert_eq!(gpt.arm(Compare::One, ticks), Arm::Armed);
+            clock.advance(Duration::from_micros(1_000 - lead));
+            skid.set(read);
+            write_time.set(write);
+            let ticks = gpt.ticks_for(Duration::from_millis(5));
+            assert_eq!(gpt.arm(Compare::One, ticks), Arm::Armed);
+            skid.set(Duration::ZERO);
+            write_time.set(Duration::ZERO);
+            assert!(
+                !gpt.take_expiry(Compare::One),
+                "the old compare's match passed for the new one: re-armed \
+                 {lead} us before it, reads {read:?}, writes {write:?}"
+            );
+            clock.advance(Duration::from_millis(5));
+            assert!(gpt.take_expiry(Compare::One), "lead {lead} us");
+        }
+    }
+}
+
+#[test]
+fn a_compare_the_counter_has_reached_as_it_is_set_is_reported() {
+    // QEMU's timer matches a compare only while the counter is below it
+    // (imx_gpt_find_limit: count < reg), and this model likewise: a compare
+    // the counter has already reached when it is written does not match
+    // until the counter wraps. The driver must say so, not wait for it.
     let clock = Rc::new(StepClock::default());
     let model = Model::new(clock.clone());
     let skid = model.skid.clone();
     let mut gpt = ImxGpt::start(model);
-    gpt.calibrate(&*clock, Duration::from_millis(1)).unwrap();
-    let ticks = gpt.ticks_for(Duration::from_millis(1));
-    assert_eq!(gpt.arm(Compare::One, ticks), Arm::Armed);
-    // Re-armed 5 us before the old compare, with a counter read that takes
-    // 10 us: the old value matches while the new one is being set.
-    clock.advance(Duration::from_micros(995));
-    skid.set(Duration::from_micros(10));
-    let ticks = gpt.ticks_for(Duration::from_millis(5));
-    assert_eq!(gpt.arm(Compare::One, ticks), Arm::Armed);
+    // At 3 MHz the counter steps every 333.3 ns: 1 ms and 200 ns after the
+    // start it reads 3000, 0.6 of a tick in.
+    clock.advance(Duration::from_nanos(1_000_200));
+    // The counter read takes 200 ns, so by the time the compare is written,
+    // one tick past the value read, the counter is on it, and it is still
+    // there when the driver looks again: 0 ticks ahead, nothing matched.
+    skid.set(Duration::from_nanos(200));
+    assert_eq!(gpt.arm(Compare::One, 1), Arm::Passed);
     skid.set(Duration::ZERO);
-    assert!(
-        !gpt.take_expiry(Compare::One),
-        "the old compare's match is not this one"
-    );
-    clock.advance(Duration::from_millis(5));
-    assert!(gpt.take_expiry(Compare::One));
+    clock.advance(Duration::from_millis(1));
+    assert!(!gpt.take_expiry(Compare::One));
+    assert_eq!(gpt.release().ir, 0, "disarmed");
 }
 
 #[test]
