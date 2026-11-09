@@ -1,7 +1,8 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! What the sensor protection domains share: channel numbers and labels from
 //! `rsb3720.system`, the generic timer as a clock, an I2C client that calls
-//! the controller's domain, and a timeout client that calls the timer's.
+//! the controller's domain, a timeout client that calls the timer's, and a
+//! wait on the domain's own endpoint for use inside a protected procedure.
 
 #![no_std]
 
@@ -26,8 +27,13 @@ pub const I2C_IRQ: Channel = Channel::new(1);
 pub const I2C_TO_TIMER: Channel = Channel::new(2);
 /// In the timer's domain: the timer's interrupt.
 pub const TIMER_IRQ: Channel = Channel::new(0);
-/// In the timer's domain: the I2C controller's domain, its one client.
+/// In the timer's domain: the I2C controller's domain, served by the
+/// timer's first compare.
 pub const TIMER_FROM_I2C: Channel = Channel::new(1);
+/// In the timer's domain: the BMP280 domain, served by the second compare.
+pub const TIMER_FROM_BMP280: Channel = Channel::new(2);
+/// In the BMP280 domain: its channel to the timer's domain.
+pub const BMP280_TO_TIMER: Channel = Channel::new(2);
 
 /// Label of an I2C transfer request; the reply's label is its status.
 pub const OP_I2C_TRANSFER: u64 = 1;
@@ -115,7 +121,10 @@ impl Clock for CounterClock {
         Instant::from_nanos(ns as i64)
     }
 
-    /// Spins: these domains have no timer driver.
+    /// Spins. i2c_imx spins only for the controller's short settling waits
+    /// and blocks for the rest; bmp280 sleeps through the timer's domain
+    /// instead; the consumer, at the lowest priority, keeps no one else
+    /// waiting while it spins.
     fn sleep_until(&self, t: Instant) {
         while self.now() < t {
             core::hint::spin_loop();
@@ -195,4 +204,26 @@ impl TimerClient {
     pub fn cancel(&self) {
         self.channel.pp_call(MessageInfo::new(OP_TIMEOUT_CANCEL, 0));
     }
+}
+
+/// This domain's endpoint, where Microkit's event loop receives: the slot of
+/// Microkit's `INPUT_CAP`, which neither the SDK nor `sel4-microkit`
+/// exports. `build.sh` checks that both still put it in slot 1.
+pub const INPUT: sel4::cap::Endpoint = sel4::Cap::from_bits(1);
+
+/// `seL4_Wait` on [`INPUT`]: blocks until a notification bound to the
+/// domain arrives, and returns the badge of those that woke it. The `sel4`
+/// crate offers `wait` on notification capabilities only, but the kernel
+/// takes an endpoint as well (`handleRecv` without a reply object), which is
+/// what is wanted here.
+///
+/// This is how a protected procedure waits: it cannot return to Microkit's
+/// event loop, so it waits on the endpoint itself. With no reply object the
+/// reply owed to its caller is kept, and the notifications bound to the
+/// domain still arrive. That is sound only while the domain has one client,
+/// blocked in the call being served: a call arriving now would find no reply
+/// object, and its caller would be left inactive (seL4's `sendIPC`), with no
+/// fault and nothing logged.
+pub fn wait_input() -> sel4::Badge {
+    INPUT.cast::<sel4::cap_type::Notification>().wait().1
 }

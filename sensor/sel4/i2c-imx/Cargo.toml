@@ -12,7 +12,6 @@ path = "src/main.rs"
 [dependencies]
 pd-common.workspace = true
 sel4-microkit.workspace = true
-sel4.workspace = true
 sensor-core.workspace = true
 sensor-wire.workspace = true
 sensor-imx-i2c.workspace = true

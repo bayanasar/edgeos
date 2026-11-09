@@ -81,14 +81,20 @@ image)
     "${container[@]}" -w /work/src/sensor/sel4 "$image" sh -ec "
         SEL4_INCLUDE_DIRS=$sdk/board/$board/$config/include \
             cargo build --release --locked --target-dir /work/target --artifact-dir /work/out
-        # i2c-imx waits on its input endpoint by slot number, which neither
-        # the SDK nor sel4-microkit exports: check both still use slot 1.
-        grep -qF 'PD_INPUT_CAP_IDX: u64 = 1;' /work/microkit/tool/microkit/src/capdl/builder.rs &&
-            grep -qF 'INPUT_CAP: sel4::cap::Endpoint = sel4::Cap::from_bits(1);' \
-                /work/toolchains/cargo/git/checkouts/rust-sel4-*/${rust_sel4_rev:0:7}/crates/sel4-microkit/base/src/ipc.rs || {
-            echo 'Microkit input endpoint not in slot 1: change INPUT in i2c-imx' >&2
-            exit 1
+        # pd-common waits on the input endpoint by slot number, which neither
+        # the SDK nor sel4-microkit exports: confirm each still uses slot 1.
+        # A text match, so a rename upstream stops the build too. Once either
+        # exports the constant, use it and drop its check.
+        confirm() { # file text
+            grep -qsF \"\$2\" \"\$1\" || {
+                echo \"could not confirm the Microkit input endpoint is in slot 1 (checked \$1):\" \\
+                    \"change INPUT in common/src/lib.rs if it has moved\" >&2
+                exit 1
+            }
         }
+        confirm /work/microkit/tool/microkit/src/capdl/builder.rs 'PD_INPUT_CAP_IDX: u64 = 1;'
+        confirm /work/toolchains/cargo/git/checkouts/rust-sel4-*/${rust_sel4_rev:0:7}/crates/sel4-microkit/base/src/ipc.rs \
+            'INPUT_CAP: sel4::cap::Endpoint = sel4::Cap::from_bits(1);'
         $sdk/bin/microkit rsb3720.system --search-path /work/out --board $board \
             --config $config -r /work/out/report.txt -o /work/out/sensor.img
     "

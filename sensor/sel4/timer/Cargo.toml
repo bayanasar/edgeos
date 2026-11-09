@@ -1,7 +1,7 @@
 [package]
 name = "pd-timer"
 version = "0.1.0"
-description = "An i.MX GPT in a domain of its own: deadlines for one client"
+description = "An i.MX GPT in a domain of its own: deadlines for each client on a compare of its own"
 edition.workspace = true
 license.workspace = true
 
