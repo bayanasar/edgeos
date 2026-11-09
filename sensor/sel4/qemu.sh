@@ -69,12 +69,17 @@ check() { # log pattern what
     fi
 }
 status=0
+# The early counts must be 0, as every run so far has shown. A tolerance would
+# be no use: an early signal can only be early by the small error left in the
+# timer's measured rate, so by the time the domain asks again the deadline has
+# mostly passed, the timer answers so, and the wait polls (polled) or the
+# sleep spins (spun), which the checks below refuse anyway.
 check empty.log 'SENSOR_RESULT: samples=0 nak=0 timeout=5 other=0 of 5' \
     'empty bus: every transfer ends in the timer domain'"'"'s timeout'
 check empty.log 'I2C_WAITS: transfers=5 irq=0 expired=5 ' \
     'empty bus: the timer, not the controller, ended every wait, at its deadline'
-check empty.log 'I2C_WAITS: .* early=[0-5] polled=0' \
-    'empty bus: no more early signals than waits, and no wait fell back to polling'
+check empty.log 'I2C_WAITS: .* early=0 polled=0' \
+    'empty bus: no early signal, and no wait fell back to polling'
 check bmp280.log 'SENSOR_RESULT: samples=5 nak=0 timeout=0 other=0 of 5' \
     'BMP280 registers on the bus: 5 samples'
 check bmp280.log 'pressure 100526390e-3 Pa temperature 3106e-2 C' \
@@ -83,8 +88,8 @@ check bmp280.log 'I2C_WAITS: transfers=20 irq=0 expired=0 early=0 polled=0' \
     'BMP280 registers on the bus: no byte was waited for'
 check bmp280.log 'BMP280_SLEEPS: timer=6 ' \
     'BMP280 registers on the bus: the start-up and 5 conversions each slept until the timer'"'"'s signal'
-check bmp280.log 'BMP280_SLEEPS: .* early=[0-6] spun=0' \
-    'BMP280 registers on the bus: no more early signals than sleeps, and no sleep spun'
+check bmp280.log 'BMP280_SLEEPS: .* early=0 spun=0' \
+    'BMP280 registers on the bus: no early signal, and no sleep spun'
 check empty.log 'BMP280_SLEEPS: timer=0 early=0 spun=0' \
     'empty bus: no sleep, since the chip never answers'
 exit $status
