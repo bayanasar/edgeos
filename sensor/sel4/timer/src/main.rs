@@ -20,7 +20,7 @@ use sel4_microkit::{
     protection_domain, with_msg_regs,
 };
 use sensor_core::bus::{Clock, Instant};
-use sensor_imx_gpt::{Arm, CNT, ImxGpt, Regs};
+use sensor_imx_gpt::{Arm, CNT, Compare, ImxGpt, Regs};
 
 /// How long the timer's rate is measured for at start: 1 ms, which spins.
 const MEASURE: Duration = Duration::from_millis(1);
@@ -77,11 +77,11 @@ impl HandlerImpl {
         }
         let now = self.clock.now();
         if deadline <= now {
-            self.gpt.disarm();
+            self.gpt.disarm(Compare::One);
             return TIMEOUT_PASSED;
         }
         let ticks = self.gpt.ticks_for(deadline.saturating_duration_since(now));
-        match self.gpt.arm(ticks) {
+        match self.gpt.arm(Compare::One, ticks) {
             Arm::Armed => 0,
             Arm::Passed => TIMEOUT_PASSED,
         }
@@ -105,7 +105,7 @@ impl Handler for HandlerImpl {
                 self.set(Instant::from_nanos(ns))
             }
             (OP_TIMEOUT_CANCEL, 0) => {
-                self.gpt.disarm();
+                self.gpt.disarm(Compare::One);
                 0
             }
             _ => ERR_REQUEST,
@@ -115,7 +115,7 @@ impl Handler for HandlerImpl {
 
     fn notified(&mut self, channels: ChannelSet) -> Result<(), Self::Error> {
         if channels.contains(TIMER_IRQ) {
-            if self.gpt.take_expiry() {
+            if self.gpt.take_expiry(Compare::One) {
                 TIMER_FROM_I2C.notify();
             }
             TIMER_IRQ.irq_ack().unwrap();

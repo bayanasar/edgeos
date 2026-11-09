@@ -1,7 +1,9 @@
 // SPDX-License-Identifier: BSD-3-Clause
 //! The general-purpose timer (GPT) of the i.MX 8M family (`fsl,imx8mp-gpt`,
-//! compatible with `fsl,imx6dl-gpt`) as a one-shot timeout source, on its
-//! first output compare.
+//! compatible with `fsl,imx6dl-gpt`) as one-shot timeout sources, one on
+//! each of its three output compares. The compares share the counter and
+//! the interrupt line, and each arms, matches and disarms apart from the
+//! others.
 //!
 //! The configuration is Linux's `drivers/clocksource/timer-imx-gpt.c` for
 //! the i.MX 6DL and later: a free-running counter on the 24 MHz oscillator
@@ -9,7 +11,8 @@
 //! rate: [`ImxGpt::calibrate`] measures it against a clock, so a different
 //! clock source or a model that ignores the oscillator prescaler gives
 //! correct timeouts too. Registers are 32 bits wide; the status flags clear
-//! when written as 1.
+//! when written as 1. In free-run mode no compare resets the counter, the
+//! first included.
 //!
 //! The timer must already be clocked; its clock gates belong to the rest of
 //! the chip.
@@ -25,6 +28,8 @@ pub const PR: usize = 0x04;
 pub const SR: usize = 0x08;
 pub const IR: usize = 0x0c;
 pub const OCR1: usize = 0x10;
+pub const OCR2: usize = 0x14;
+pub const OCR3: usize = 0x18;
 pub const CNT: usize = 0x24;
 
 pub const CR_EN: u32 = 1 << 0;
@@ -39,8 +44,44 @@ pub const CR_EN_24M: u32 = 1 << 10;
 pub const PR_PRESCALER_MASK: u32 = 0xfff;
 pub const PR_PRESCALER24M_SHIFT: u32 = 12;
 
+/// Output compare flags in SR, and the matching interrupt enables in IR,
+/// which use the same bits.
 pub const SR_OF1: u32 = 1 << 0;
+pub const SR_OF2: u32 = 1 << 1;
+pub const SR_OF3: u32 = 1 << 2;
 pub const IR_OF1IE: u32 = 1 << 0;
+pub const IR_OF2IE: u32 = 1 << 1;
+pub const IR_OF3IE: u32 = 1 << 2;
+
+/// One of the timer's three output compares.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Compare {
+    One,
+    Two,
+    Three,
+}
+
+impl Compare {
+    pub const ALL: [Compare; 3] = [Compare::One, Compare::Two, Compare::Three];
+
+    /// Its compare register.
+    pub const fn ocr(self) -> usize {
+        match self {
+            Compare::One => OCR1,
+            Compare::Two => OCR2,
+            Compare::Three => OCR3,
+        }
+    }
+
+    /// Its bit in SR and in IR.
+    pub const fn flag(self) -> u32 {
+        match self {
+            Compare::One => SR_OF1,
+            Compare::Two => SR_OF2,
+            Compare::Three => SR_OF3,
+        }
+    }
+}
 
 /// Word access to the timer's registers, at the offsets above.
 pub trait Regs {
@@ -58,7 +99,7 @@ impl<T: Regs + ?Sized> Regs for &mut T {
     }
 }
 
-/// The outcome of arming the compare.
+/// The outcome of arming a compare.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Arm {
     /// The timer interrupts when the counter reaches the compare value.
@@ -71,11 +112,13 @@ pub enum Arm {
 pub struct ImxGpt<R> {
     regs: R,
     hz: u64,
-    armed: bool,
+    /// The flags of the armed compares: what IR holds, so arming or
+    /// disarming one compare writes the others' enables back unchanged.
+    armed: u32,
 }
 
 impl<R: Regs> ImxGpt<R> {
-    /// Resets the timer and starts it counting as Linux does, with the
+    /// Resets the timer and starts it counting as Linux does, with every
     /// compare disarmed. The rate is unknown until [`calibrate`] runs.
     ///
     /// [`calibrate`]: ImxGpt::calibrate
@@ -84,11 +127,11 @@ impl<R: Regs> ImxGpt<R> {
         regs.write(IR, 0);
         regs.write(PR, 7 << PR_PRESCALER24M_SHIFT);
         regs.write(CR, CR_FRR | CR_WAITEN | CR_CLKSRC_OSC | CR_EN_24M | CR_EN);
-        regs.write(SR, SR_OF1);
+        regs.write(SR, SR_OF1 | SR_OF2 | SR_OF3);
         ImxGpt {
             regs,
             hz: 0,
-            armed: false,
+            armed: 0,
         }
     }
 
@@ -130,42 +173,45 @@ impl<R: Regs> ImxGpt<R> {
         ticks.clamp(1, i32::MAX as u128) as u32
     }
 
-    /// Interrupts once the counter is `ticks` past its current value.
-    pub fn arm(&mut self, ticks: u32) -> Arm {
+    /// Interrupts once the counter is `ticks` past its current value, on
+    /// compare `c`. The other compares are left as they are.
+    pub fn arm(&mut self, c: Compare, ticks: u32) -> Arm {
         let ticks = ticks.clamp(1, i32::MAX as u32);
-        self.regs.write(IR, 0);
+        let flag = c.flag();
+        self.armed &= !flag;
+        self.regs.write(IR, self.armed);
         let target = self.count().wrapping_add(ticks);
-        self.regs.write(OCR1, target);
+        self.regs.write(c.ocr(), target);
         // Cleared after the new value is in place, so a match of the old one
         // cannot pass for this one.
-        self.regs.write(SR, SR_OF1);
-        self.regs.write(IR, IR_OF1IE);
-        self.armed = true;
+        self.regs.write(SR, flag);
+        self.armed |= flag;
+        self.regs.write(IR, self.armed);
         // Linux's v2_set_next_event: a compare value the counter has already
         // reached matches only after the counter wraps. A match cleared above
         // is among them, so the check is against the counter, not the flag.
         let ahead = target.wrapping_sub(self.count()) as i32;
-        if ahead <= 0 && self.regs.read(SR) & SR_OF1 == 0 {
-            self.disarm();
+        if ahead <= 0 && self.regs.read(SR) & flag == 0 {
+            self.disarm(c);
             return Arm::Passed;
         }
         Arm::Armed
     }
 
-    pub fn disarm(&mut self) {
-        self.regs.write(IR, 0);
-        self.regs.write(SR, SR_OF1);
-        self.armed = false;
+    pub fn disarm(&mut self, c: Compare) {
+        self.armed &= !c.flag();
+        self.regs.write(IR, self.armed);
+        self.regs.write(SR, c.flag());
     }
 
-    /// Whether the compare matched since it was armed. A match clears and
+    /// Whether compare `c` matched since it was armed. A match clears and
     /// disarms it. The flag also sets while disarmed, each time the counter
     /// wraps round to the old compare value, so it counts only when armed.
-    pub fn take_expiry(&mut self) -> bool {
-        if !self.armed || self.regs.read(SR) & SR_OF1 == 0 {
+    pub fn take_expiry(&mut self, c: Compare) -> bool {
+        if self.armed & c.flag() == 0 || self.regs.read(SR) & c.flag() == 0 {
             return false;
         }
-        self.disarm();
+        self.disarm(c);
         true
     }
 }
