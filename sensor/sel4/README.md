@@ -149,6 +149,26 @@ u-boot=> mw.l 0x3038b580 0x10000000; mw.l 0x30384100 3
 I2C4 reaches header UIO2: pin 16 SDA, 18 SCL, 19 3.3 V, 20 GND (RSB-3720
 user manual, ed. 1, section 2.4.2.20).
 
+## Result in QEMU, with the BMP280 domain's sleeps on the timer (2026-11-08)
+
+Three runs of the same image. The timer domain measures GPT1 at 15953611
+to 15975230 Hz; before each counter read was timed from both sides it read
+15.5 to 15.7 MHz. With I2C4 empty, each of the 5 requests again ends in a
+timeout (`0x101`) after about 50 ms (50.4 to 51.2 ms in the last run), and
+each run ends with
+`BMP280_SLEEPS: timer=0 early=0 spun=0` and
+`I2C_WAITS: transfers=5 irq=0 expired=5 early=0 polled=0`. With the rate
+measured as before, the same bus showed `expired=5 early=5`: the timer's
+signal came early once in every 50 ms wait, and the wait asked again.
+
+With a BMP280's registers on the bus, all 5 samples arrive with the same
+values as before (in the last run, the first request after 13 ms and the
+others after 6.7 to 7.0 ms), and each run ends with
+`BMP280_SLEEPS: timer=6 early=0 spun=0` and
+`I2C_WAITS: transfers=20 irq=0 expired=0 early=0 polled=0`: the 2 ms
+start-up and the 5 conversions of 5.5 ms each slept until the timer's
+signal on its second compare.
+
 ## Result in QEMU (2026-10-22)
 
 With I2C4 empty, each of the 5 requests ends in a timeout (`0x101`) after
