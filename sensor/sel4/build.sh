@@ -84,17 +84,20 @@ image)
         # pd-common waits on the input endpoint by slot number, which neither
         # the SDK nor sel4-microkit exports: confirm each still uses slot 1.
         # A text match, so a rename upstream stops the build too. Once either
-        # exports the constant, use it and drop its check.
-        confirm() { # file text
-            grep -qsF \"\$2\" \"\$1\" || {
-                echo \"could not confirm the Microkit input endpoint is in slot 1 (checked \$1):\" \\
+        # exports the constant, use it and drop its check. The text comes
+        # first: a glob for the files can match more than one checkout in a
+        # CARGO_HOME that persists across builds.
+        confirm() { # text file...
+            t=\$1; shift
+            grep -qsF \"\$t\" \"\$@\" || {
+                echo \"could not confirm the Microkit input endpoint is in slot 1 (checked \$*):\" \\
                     \"change INPUT in common/src/lib.rs if it has moved\" >&2
                 exit 1
             }
         }
-        confirm /work/microkit/tool/microkit/src/capdl/builder.rs 'PD_INPUT_CAP_IDX: u64 = 1;'
-        confirm /work/toolchains/cargo/git/checkouts/rust-sel4-*/${rust_sel4_rev:0:7}/crates/sel4-microkit/base/src/ipc.rs \
-            'INPUT_CAP: sel4::cap::Endpoint = sel4::Cap::from_bits(1);'
+        confirm 'PD_INPUT_CAP_IDX: u64 = 1;' /work/microkit/tool/microkit/src/capdl/builder.rs
+        confirm 'INPUT_CAP: sel4::cap::Endpoint = sel4::Cap::from_bits(1);' \
+            /work/toolchains/cargo/git/checkouts/rust-sel4-*/${rust_sel4_rev:0:7}/crates/sel4-microkit/base/src/ipc.rs
         $sdk/bin/microkit rsb3720.system --search-path /work/out --board $board \
             --config $config -r /work/out/report.txt -o /work/out/sensor.img
     "
