@@ -4,7 +4,7 @@ The sensor stack on seL4: a timer, an I2C controller driver, the BMP280
 driver and a consumer, each in a Microkit protection domain of its own, for
 the Advantech RSB-3720 (NXP i.MX 8M Plus).
 
-Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's conversions; passes in QEMU's imx8mp-evk (`qemu.sh`); not yet run on the board, where the version before it ran with no sensor connected · Updated: 2026-11-08
+Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's conversions; samples a BMP280 on the board, and passes in QEMU's imx8mp-evk (`qemu.sh`) · Updated: 2026-11-08
 
 ## Four domains
 
@@ -149,6 +149,31 @@ u-boot=> mw.l 0x3038b580 0x10000000; mw.l 0x30384100 3
 I2C4 reaches header UIO2: pin 16 SDA, 18 SCL, 19 3.3 V, 20 GND (RSB-3720
 user manual, ed. 1, section 2.4.2.20).
 
+## Result on the board with a BMP280 (2026-11-08)
+
+A BMP280 module on UIO2: VCC to pin 19, GND to pin 20, SDI to pin 16 (SDA),
+SCK to pin 18 (SCL), CS to 3.3 V, which selects I2C, and SDO to ground,
+which sets address 0x76. From the board's Linux, `i2cdetect -y 3` finds it
+at 0x76, and its chip ID register, 0xD0, reads 0x58.
+
+The image built from the parent of this change (SHA-256 `a0e8848c...`)
+ran twice, and this change's image (`004170e6...`) three times. In every
+run all 5 requests return a sample, 101711 to 101737 Pa and 23.64 to
+23.80 C. The first request takes 13.7 ms, the driver's initialisation
+included; the others 7.31 to 7.32 ms, 5.5 ms of it the conversion. Every
+run ends with `irq=121` and every other count 0: the 20 transfers put
+121 bytes on the bus (41 to initialise, 16 per sample), and the
+controller's interrupt woke the driver for each one.
+
+GPT1 measures 2994876 Hz in both runs of the parent and 2997873 to
+2998061 Hz in this change's, now that each counter read is timed from both
+sides: 0.17 % below 3 MHz, and then 0.06 to 0.07 %. With this change every
+run ends with `BMP280_SLEEPS: timer=6 early=0 spun=0`: the 2 ms start-up
+after the reset and the 5 conversions each blocked until the timer's
+signal on its second compare, with no early signal and no sleep spun. The
+requests take as long as before; what changes is that the processor is
+free while the BMP280 domain waits.
+
 ## Result in QEMU, with the BMP280 domain's sleeps on the timer (2026-11-08)
 
 Three runs of the same image. The timer domain measures GPT1 at 15953611
@@ -200,11 +225,11 @@ not they are muxed. A sensor on the bus will.
 
 ## Not yet covered
 
-- A sensor on the bus.
 - A transfer ended by the timer's deadline on the board; QEMU covers it.
 - Pins and clocks set by a component of the system rather than the boot
   loader.
 - More than one client of the controller, or a third of the timer.
-- The BMP280 domain's sleeps on the board: without a sensor the chip never
-  answers, so the driver never sleeps. QEMU covers them.
+- Both of the timer's clients waiting at once on the board: the BMP280
+  domain sleeps only between transfers, so here they never overlap. The
+  timer driver's host tests cover two compares armed together.
 - A release build of the kernel and domains.
