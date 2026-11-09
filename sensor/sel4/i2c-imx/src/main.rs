@@ -77,16 +77,23 @@ enum Deadline {
     Stopped,
 }
 
-/// How each wait ended, so a run shows which path it took. A byte that
-/// completed before the driver looked at the status is not waited for, and
-/// not counted.
+/// How each wait ended, and how often the timer woke one early, so a run
+/// shows which path it took. A byte that completed before the driver looked
+/// at the status is not waited for, and not counted.
 #[derive(Default)]
 struct Counts {
     /// Woken by the controller's interrupt.
     irq: u32,
-    /// Woken by the timer's signal: the deadline, or an early signal that
-    /// the clock overrules.
-    timer: u32,
+    /// Ended in a timeout, the deadline passed by the counter clock: woken by
+    /// the timer's signal, or, if the domain was held up, started after the
+    /// deadline.
+    expired: u32,
+    /// Woken by the timer's signal with the deadline still ahead by the
+    /// counter clock: a signal a little early, or one left from a deadline
+    /// already cancelled. The clock overrules it, and the wait goes on. A
+    /// signal that comes with the controller's interrupt is neither: the
+    /// interrupt ends the wait.
+    early: u32,
     /// Returned without blocking, for the driver to poll, because the timer
     /// could not help.
     polled: u32,
@@ -112,9 +119,17 @@ impl Wait for IrqWait {
 
     fn wait(&mut self, clock: &impl Clock, deadline: Instant) -> Result<(), BusError> {
         self.ack();
+        // Whether the timer's signal woke this wait last time round: the
+        // clock reading that follows says whether it was early.
+        let mut signalled = false;
         loop {
             if clock.now() >= deadline {
+                self.counts.expired += 1;
                 return Err(BusError::Timeout);
+            }
+            if signalled {
+                self.counts.early += 1;
+                signalled = false;
             }
             match self.deadline {
                 Deadline::Armed(d) if d == deadline => {}
@@ -134,8 +149,7 @@ impl Wait for IrqWait {
             }
             let badge = wait_input();
             if badge & (1 << I2C_TO_TIMER.index()) != 0 {
-                self.counts.timer += 1;
-                // Possibly a deadline already cancelled; the clock decides.
+                signalled = true;
                 self.deadline = Deadline::Unset;
             }
             if badge & (1 << I2C_IRQ.index()) != 0 {
@@ -207,10 +221,11 @@ impl HandlerImpl {
     fn report(&self) {
         let c = &self.i2c.waiter().counts;
         debug_println!(
-            "I2C_WAITS: transfers={} irq={} timer={} polled={}",
+            "I2C_WAITS: transfers={} irq={} expired={} early={} polled={}",
             self.transfers,
             c.irq,
-            c.timer,
+            c.expired,
+            c.early,
             c.polled
         );
     }

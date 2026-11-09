@@ -32,10 +32,14 @@ Status: interrupt-driven, with a timer domain for deadlines; passes in QEMU's im
   transfer. A transfer holds the bus for at most 100 ms, whatever deadline
   the client asks for. If the timer does not count, the domain polls
   instead, and that 100 ms is again how long lower priorities may wait.
-- `i2c_imx` counts how its waits end: woken by the controller's interrupt,
-  woken by the timer, or returned to poll because the timer could not help.
-  A byte already complete when the driver first looks is not waited for and
-  not counted, so `irq` above 0 is what shows the interrupt path was taken.
+- `i2c_imx` counts how its waits end: woken by the controller's interrupt
+  (`irq`), ended at the deadline (`expired`), or returned to poll because
+  the timer could not help (`polled`). Apart from those it counts the
+  timer's signals that the counter clock overrules (`early`): a signal that
+  comes while the deadline is still ahead, a little early or left from a
+  deadline already cancelled, after which the wait asks again. A byte
+  already complete when the driver first looks is not waited for and not
+  counted, so `irq` above 0 is what shows the interrupt path was taken.
 - `i2c_imx` now depends on `timer` to end every wait: if GPT1 stopped
   counting after its rate was measured, or its interrupt were lost, a wait
   would never end, with no fault and nothing logged, and `bmp280` and
@@ -53,8 +57,9 @@ Status: interrupt-driven, with a timer domain for deadlines; passes in QEMU's im
 - `consumer` asks for 5 samples, 500 ms apart, and prints each with how
   long it took. Then it asks, through `bmp280`, for `i2c_imx`'s counts,
   which `i2c_imx` prints as
-  `I2C_WAITS: transfers=... irq=... timer=... polled=...`, and prints a
-  summary: `SENSOR_RESULT: samples=... nak=... timeout=... other=... of 5`.
+  `I2C_WAITS: transfers=... irq=... expired=... early=... polled=...`, and
+  prints a summary:
+  `SENSOR_RESULT: samples=... nak=... timeout=... other=... of 5`.
   The counts wait until the end because a line at 115200 baud takes about
   4 ms to print, which would swamp the timing of a transfer.
 
