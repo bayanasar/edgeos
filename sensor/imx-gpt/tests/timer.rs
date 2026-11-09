@@ -386,3 +386,16 @@ fn a_match_waiting_to_be_taken_survives_another_compare_being_set() {
     gpt.disarm(Compare::One);
     assert!(gpt.take_expiry(Compare::Two), "its flag was not cleared");
 }
+
+#[test]
+fn the_time_a_counter_read_takes_does_not_skew_the_rate() {
+    let clock = Rc::new(StepClock::default());
+    let model = Model::new(clock.clone());
+    // Each read of the counter takes 10 us, 1 % of the measurement: counted
+    // into the interval, it would measure about 2.97 MHz.
+    model.skid.set(Duration::from_micros(10));
+    let mut gpt = ImxGpt::start(model);
+    let hz = gpt.calibrate(&*clock, Duration::from_millis(1)).unwrap();
+    // 24 MHz / 8, within a tick of the 3000 counted.
+    assert!((2_999_000..=3_001_000).contains(&hz), "{hz} Hz");
+}

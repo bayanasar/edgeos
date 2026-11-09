@@ -21,7 +21,7 @@
 #![forbid(unsafe_code)]
 
 use core::time::Duration;
-use sensor_core::bus::Clock;
+use sensor_core::bus::{Clock, Instant};
 
 pub const CR: usize = 0x00;
 pub const PR: usize = 0x04;
@@ -146,19 +146,29 @@ impl<R: Regs> ImxGpt<R> {
     /// Measures the counting rate over at least `over` of `clock`, and keeps
     /// it for [`ticks_for`]. `None` if the counter did not move.
     ///
+    /// Each of the two counts is timed by the clock readings either side of
+    /// it, so the time a register read takes is not counted into the
+    /// interval. Counted in, it would measure the rate low by that share of
+    /// `over`: 0.1 % for a read that takes 1 us, over 1 ms.
+    ///
     /// [`ticks_for`]: ImxGpt::ticks_for
     pub fn calibrate(&mut self, clock: &impl Clock, over: Duration) -> Option<u64> {
-        let t0 = clock.now();
+        let before0 = clock.now();
         let c0 = self.count();
-        let end = t0.checked_add(over)?;
+        let after0 = clock.now();
+        let end = before0.checked_add(over)?;
         while clock.now() < end {}
+        let before1 = clock.now();
         let c1 = self.count();
-        let ns = clock.now().saturating_duration_since(t0).as_nanos();
+        let after1 = clock.now();
+        // Twice the time between the midpoints of the two readings.
+        let sum = |a: Instant, b: Instant| i128::from(a.as_nanos()) + i128::from(b.as_nanos());
+        let ns2 = u128::try_from(sum(before1, after1) - sum(before0, after0)).ok()?;
         let ticks = u128::from(c1.wrapping_sub(c0));
-        if ticks == 0 || ns == 0 {
+        if ticks == 0 || ns2 == 0 {
             return None;
         }
-        self.hz = u64::try_from(ticks * 1_000_000_000 / ns).ok()?;
+        self.hz = u64::try_from(ticks * 2_000_000_000 / ns2).ok()?;
         Some(self.hz)
     }
 
