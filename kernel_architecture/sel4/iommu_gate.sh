@@ -41,7 +41,15 @@ else
     [[ -d $workspace/sel4test/$build ]] || {
         echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
     }
-    "${container[@]}" -i "$image" python3 - \
-        "/work/logs/$build-test.log" "${TEST_TIMEOUT:-120}" \
-        < "$script_dir/iommu_gate/capture.py"
+    # Slot numbers are fixed: they are the requester IDs the root task expects.
+    cargo run --quiet --release --manifest-path "$script_dir/qemu-capture/Cargo.toml" -- \
+        --log "$workspace/logs/$build-test.log" --timeout "${TEST_TIMEOUT:-120}" \
+        --pass 'IOMMU_GATE: PASS' --fail 'IOMMU_GATE: FAIL' \
+        --summary 'IOMMU gate: {passed}/{total} checks passed' --fail-line 'FAIL: ' \
+        -- "${container[@]}" --init -i "$image" \
+        qemu-system-riscv64 -machine virt -cpu rv64 -nographic -m size=3072 -bios none \
+        -device riscv-iommu-pci,addr=01.0 \
+        -device edu,addr=02.0,dma_mask=0xffffffffff \
+        -device edu,addr=03.0,dma_mask=0xffffffffff \
+        -kernel images/iommu_gate-image-riscv-qemu-riscv-virt
 fi

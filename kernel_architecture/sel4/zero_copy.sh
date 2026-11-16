@@ -59,7 +59,11 @@ else
     [[ -d $workspace/sel4test/$build ]] || {
         echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
     }
-    "${container[@]}" -i "$image" python3 - \
-        "/work/logs/$build-test.log" "${TEST_TIMEOUT:-120}" \
-        < "$script_dir/zero_copy/capture.py"
+    cargo run --quiet --release --manifest-path "$script_dir/qemu-capture/Cargo.toml" -- \
+        --log "$workspace/logs/$build-test.log" --timeout "${TEST_TIMEOUT:-120}" \
+        --pass 'ZERO_COPY: PASS' --fail 'ZERO_COPY: FAIL' \
+        --summary 'Zero copy: {passed}/{total} checks passed' --fail-line 'FAIL: ' \
+        -- "${container[@]}" --init -i "$image" \
+        qemu-system-riscv64 -machine virt -cpu rv64 -nographic -m size=3072 -bios none \
+        -kernel images/zero_copy-image-riscv-qemu-riscv-virt
 fi

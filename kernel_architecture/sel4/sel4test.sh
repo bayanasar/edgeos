@@ -76,7 +76,9 @@ else
     [[ -d $workspace/sel4test/$build ]] || {
         echo "No build at $workspace/sel4test/$build: run '$0 build $2' first" >&2; exit 1;
     }
-    "${container[@]}" -i "$image" python3 - \
-        "/work/logs/$build-test.log" "${TEST_TIMEOUT:-180}" \
-        < "$script_dir/qemu_capture.py"
+    cargo run --quiet --release --manifest-path "$script_dir/qemu-capture/Cargo.toml" -- \
+        --log "$workspace/logs/$build-test.log" --timeout "${TEST_TIMEOUT:-180}" \
+        --pass 'All is well in the universe' --fail 'Test suite failed.' \
+        --summary 'Test suite passed. {passed} tests passed. {_} tests disabled.' \
+        -- "${container[@]}" --init -i "$image" ./simulate
 fi

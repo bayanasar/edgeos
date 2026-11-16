@@ -8,4 +8,6 @@ seL4 tooling, in `sel4/`:
 - a [zero-copy buffer handoff](sel4/zero_copy/README.md): a buffer manager
   lends frames to clients and revokes them, with the cost per handoff
   counted by the kernel and revocation on a deadline;
+- [`qemu-capture`](sel4/qemu-capture/README.md), which runs those tests in
+  QEMU, keeps their output and decides their verdicts;
 - device-tree overlays for boards in `sel4/boards/`.
