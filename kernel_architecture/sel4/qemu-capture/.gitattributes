@@ -1,0 +1,2 @@
+# Recorded QEMU output, kept byte for byte: line ends are part of the test.
+tests/transcripts/*.log -text

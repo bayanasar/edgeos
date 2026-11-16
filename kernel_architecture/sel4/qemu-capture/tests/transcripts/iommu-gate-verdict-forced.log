@@ -1,0 +1,311 @@
+
+OpenSBI v0.9
+   ____                    _____ ____ _____
+  / __ \                  / ____|  _ \_   _|
+ | |  | |_ __   ___ _ __ | (___ | |_) || |
+ | |  | | '_ \ / _ \ '_ \ \___ \|  _ < | |
+ | |__| | |_) |  __/ | | |____) | |_) || |_
+  \____/| .__/ \___|_| |_|_____/|____/_____|
+        | |
+        |_|
+
+Platform Name             : riscv-virtio,qemu
+Platform Features         : timer,mfdeleg
+Platform HART Count       : 1
+Firmware Base             : 0x80000000
+Firmware Size             : 100 KB
+Runtime SBI Version       : 0.2
+
+Domain0 Name              : root
+Domain0 Boot HART         : 0
+Domain0 HARTs             : 0*
+Domain0 Region00          : 0x0000000080000000-0x000000008001ffff ()
+Domain0 Region01          : 0x0000000000000000-0xffffffffffffffff (R,W,X)
+Domain0 Next Address      : 0x0000000080200000
+Domain0 Next Arg1         : 0x0000000082200000
+Domain0 Next Mode         : S-mode
+Domain0 SysReset          : yes
+
+Boot HART ID              : 0
+Boot HART Domain          : root
+Boot HART ISA             : rv64imafdcsuh
+Boot HART Features        : scounteren,mcounteren,time
+Boot HART PMP Count       : 16
+Boot HART PMP Granularity : 4
+Boot HART PMP Address Bits: 54
+Boot HART MHPM Count      : 0
+Boot HART MHPM Count      : 0
+Boot HART MIDELEG         : 0x0000000000001666
+Boot HART MEDELEG         : 0x0000000000f0b509
+ELF-loader started on (HART 0) (NODES 1)
+  paddr=[81000000..810d2fff]
+Looking for DTB in CPIO archive...found at 810203d8.
+Loaded DTB from 810203d8.
+   paddr=[80221000..80222fff]
+ELF-loading image 'kernel' to 80200000
+  paddr=[80200000..80220fff]
+  vaddr=[ffffffff80200000..ffffffff80220fff]
+  virt_entry=ffffffff80200000
+ELF-loading image 'rootserver' to 80223000
+  paddr=[80223000..8040cfff]
+  vaddr=[10000..1f9fff]
+  virt_entry=1704a
+Enabling MMU and paging
+Jumping to kernel-image entry point...
+
+Init local IRQ
+Bootstrapping kernel
+Initializing PLIC...
+Available phys memory regions: 1
+  [80200000..140000000)
+Reserved virt address space regions: 3
+  [ffffffc080200000..ffffffc080221000)
+  [ffffffc080221000..ffffffc08022244b)
+  [ffffffc080223000..ffffffc08040d000)
+Booting all finished, dropped to user space
+
+Warning: using printf before serial is set up. This only works as your
+printf is backed by seL4_Debug_PutChar()
+iommu-gate: seL4 root task on qemu-riscv-virt
+pci 00:00.0 1b36:0008 class 060000
+pci 00:01.0 1b36:0014 class 080600
+pci 00:02.0 1234:11e8 class 00ff00
+pci 00:03.0 1234:11e8 class 00ff00
+bar0 00:01.0 at 0x40000000 size 0x1000
+bar0 00:02.0 at 0x40100000 size 0x100000
+bar0 00:03.0 at 0x40200000 size 0x100000
+iommu: cap 0x78c2cf0f10, queues on, directory Off
+pages: grant 0x80428000 ro 0x80429000 scratch 0x8042a000 secret 0x8042b000
+  fault: cause=256 devid=0x10 iotval=0
+  16 fault record(s), 0 mismatched
+PASS: directory Off refuses device write
+  fault: cause=258 devid=0x18 iotval=0
+  16 fault record(s), 0 mismatched
+  fault: cause=258 devid=0x18 iotval=0
+  16 fault record(s), 0 mismatched
+PASS: device without context refused while another is granted
+PASS: permitted device read
+PASS: permitted device write
+  fault: cause=15 devid=0x10 iotval=0x42b000
+  fault: cause=15 devid=0x10 iotval=0x42b004
+  fault: cause=15 devid=0x10 iotval=0x42b008
+  fault: cause=15 devid=0x10 iotval=0x42b00c
+  fault: cause=15 devid=0x10 iotval=0x42b010
+  fault: cause=15 devid=0x10 iotval=0x42b014
+  fault: cause=15 devid=0x10 iotval=0x42b018
+  fault: cause=15 devid=0x10 iotval=0x42b01c
+  fault: cause=15 devid=0x10 iotval=0x42b020
+  fault: cause=15 devid=0x10 iotval=0x42b024
+  fault: cause=15 devid=0x10 iotval=0x42b028
+  fault: cause=15 devid=0x10 iotval=0x42b02c
+  fault: cause=15 devid=0x10 iotval=0x42b030
+  fault: cause=15 devid=0x10 iotval=0x42b034
+  fault: cause=15 devid=0x10 iotval=0x42b038
+  fault: cause=15 devid=0x10 iotval=0x42b03c
+  16 fault record(s), 16 mismatched
+FAIL: write by physical address outside grant refused
+  fault: cause=15 devid=0x10 iotval=0x103000
+  16 fault record(s), 0 mismatched
+PASS: write to unmapped IOVA refused
+  fault: cause=13 devid=0x10 iotval=0x42b000
+  fault: cause=13 devid=0x10 iotval=0x42b004
+  fault: cause=13 devid=0x10 iotval=0x42b008
+  fault: cause=13 devid=0x10 iotval=0x42b00c
+  fault: cause=13 devid=0x10 iotval=0x42b010
+  fault: cause=13 devid=0x10 iotval=0x42b014
+  fault: cause=13 devid=0x10 iotval=0x42b018
+  fault: cause=13 devid=0x10 iotval=0x42b01c
+  fault: cause=13 devid=0x10 iotval=0x42b020
+  fault: cause=13 devid=0x10 iotval=0x42b024
+  fault: cause=13 devid=0x10 iotval=0x42b028
+  fault: cause=13 devid=0x10 iotval=0x42b02c
+  fault: cause=13 devid=0x10 iotval=0x42b030
+  fault: cause=13 devid=0x10 iotval=0x42b034
+  fault: cause=13 devid=0x10 iotval=0x42b038
+  fault: cause=13 devid=0x10 iotval=0x42b03c
+  16 fault record(s), 16 mismatched
+FAIL: read outside grant refused, nothing exfiltrated
+  fault: cause=15 devid=0x10 iotval=0x101000
+  16 fault record(s), 0 mismatched
+PASS: write to read-only mapping refused
+PASS: read from read-only mapping permitted
+PASS: same IOVA reaches each device's own page
+  fault: cause=15 devid=0x18 iotval=0x102000
+  16 fault record(s), 0 mismatched
+PASS: second device cannot reach the first device's mappings
+INFO: write after unmap without IOTLB flush landed (stale IOTLB entry)
+  fault: cause=15 devid=0x10 iotval=0x100000
+  16 fault record(s), 0 mismatched
+PASS: write after revocation refused
+  fault: cause=13 devid=0x10 iotval=0x100000
+  16 fault record(s), 0 mismatched
+PASS: read after revocation refused, nothing exfiltrated
+PASS: MSI to the granted interrupt file delivered
+  fault: cause=262 devid=0x10 iotval=0
+  1 fault record(s), 0 mismatched
+PASS: MSI to an interrupt file without an entry refused
+  fault: cause=15 devid=0x10 iotval=0x80435000
+  1 fault record(s), 0 mismatched
+PASS: MSI aimed at the interrupt file's physical address refused
+  fault: cause=15 devid=0x10 iotval=0x424400
+  fault: cause=15 devid=0x10 iotval=0x424404
+  fault: cause=15 devid=0x10 iotval=0x424408
+  fault: cause=15 devid=0x10 iotval=0x42440c
+  fault: cause=15 devid=0x10 iotval=0x424410
+  fault: cause=15 devid=0x10 iotval=0x424414
+  fault: cause=15 devid=0x10 iotval=0x424418
+  fault: cause=15 devid=0x10 iotval=0x42441c
+  fault: cause=15 devid=0x10 iotval=0x424420
+  fault: cause=15 devid=0x10 iotval=0x424424
+  fault: cause=15 devid=0x10 iotval=0x424428
+  fault: cause=15 devid=0x10 iotval=0x42442c
+  fault: cause=15 devid=0x10 iotval=0x424430
+  fault: cause=15 devid=0x10 iotval=0x424434
+  fault: cause=15 devid=0x10 iotval=0x424438
+  fault: cause=15 devid=0x10 iotval=0x42443c
+  16 fault record(s), 16 mismatched
+FAIL: device write to its own device context refused
+  fault: cause=15 devid=0x10 iotval=0x425000
+  fault: cause=15 devid=0x10 iotval=0x425004
+  fault: cause=15 devid=0x10 iotval=0x425008
+  fault: cause=15 devid=0x10 iotval=0x42500c
+  fault: cause=15 devid=0x10 iotval=0x425010
+  fault: cause=15 devid=0x10 iotval=0x425014
+  fault: cause=15 devid=0x10 iotval=0x425018
+  fault: cause=15 devid=0x10 iotval=0x42501c
+  fault: cause=15 devid=0x10 iotval=0x425020
+  fault: cause=15 devid=0x10 iotval=0x425024
+  fault: cause=15 devid=0x10 iotval=0x425028
+  fault: cause=15 devid=0x10 iotval=0x42502c
+  fault: cause=15 devid=0x10 iotval=0x425030
+  fault: cause=15 devid=0x10 iotval=0x425034
+  fault: cause=15 devid=0x10 iotval=0x425038
+  fault: cause=15 devid=0x10 iotval=0x42503c
+  16 fault record(s), 16 mismatched
+FAIL: device write to the IOMMU command queue refused
+  fault: cause=15 devid=0x10 iotval=0x42c000
+  fault: cause=15 devid=0x10 iotval=0x42c004
+  fault: cause=15 devid=0x10 iotval=0x42c008
+  fault: cause=15 devid=0x10 iotval=0x42c00c
+  fault: cause=15 devid=0x10 iotval=0x42c010
+  fault: cause=15 devid=0x10 iotval=0x42c014
+  fault: cause=15 devid=0x10 iotval=0x42c018
+  fault: cause=15 devid=0x10 iotval=0x42c01c
+  fault: cause=15 devid=0x10 iotval=0x42c020
+  fault: cause=15 devid=0x10 iotval=0x42c024
+  fault: cause=15 devid=0x10 iotval=0x42c028
+  fault: cause=15 devid=0x10 iotval=0x42c02c
+  fault: cause=15 devid=0x10 iotval=0x42c030
+  fault: cause=15 devid=0x10 iotval=0x42c034
+  fault: cause=15 devid=0x10 iotval=0x42c038
+  fault: cause=15 devid=0x10 iotval=0x42c03c
+  16 fault record(s), 16 mismatched
+FAIL: device write to its own page-table root refused
+  fault: cause=13 devid=0x10 iotval=0x424400
+  fault: cause=13 devid=0x10 iotval=0x424404
+  fault: cause=13 devid=0x10 iotval=0x424408
+  fault: cause=13 devid=0x10 iotval=0x42440c
+  fault: cause=13 devid=0x10 iotval=0x424410
+  fault: cause=13 devid=0x10 iotval=0x424414
+  fault: cause=13 devid=0x10 iotval=0x424418
+  fault: cause=13 devid=0x10 iotval=0x42441c
+  fault: cause=13 devid=0x10 iotval=0x424420
+  fault: cause=13 devid=0x10 iotval=0x424424
+  fault: cause=13 devid=0x10 iotval=0x424428
+  fault: cause=13 devid=0x10 iotval=0x42442c
+  fault: cause=13 devid=0x10 iotval=0x424430
+  fault: cause=13 devid=0x10 iotval=0x424434
+  fault: cause=13 devid=0x10 iotval=0x424438
+  fault: cause=13 devid=0x10 iotval=0x42443c
+  16 fault record(s), 16 mismatched
+FAIL: device read of its own device context refused, nothing exfiltrated
+PASS: a device that finishes before its deadline: its write lands
+PASS: a device still busy at its deadline is not waited for
+PASS: the abort completes while the device's transfer is pending
+  fault: cause=15 devid=0x10 iotval=0x104000
+  16 fault record(s), 0 mismatched
+PASS: the device's late write is refused: the next owner's data is intact
+  fault: cause=13 devid=0x10 iotval=0x104000
+  16 fault record(s), 0 mismatched
+PASS: the device's late read is refused: nothing of the next owner's data leaks
+PASS: the driver starts in its own address space
+  driver slot 2: cap type 4, address 0
+PASS: the driver holds only its endpoint: no memory, frame, VSpace or IOMMU capability
+PASS: the driver's device reads and writes its grant
+  fault: cause=15 devid=0x18 iotval=0x424600
+  fault: cause=15 devid=0x18 iotval=0x424604
+  fault: cause=15 devid=0x18 iotval=0x424608
+  fault: cause=15 devid=0x18 iotval=0x42460c
+  fault: cause=15 devid=0x18 iotval=0x424610
+  fault: cause=15 devid=0x18 iotval=0x424614
+  fault: cause=15 devid=0x18 iotval=0x424618
+  fault: cause=15 devid=0x18 iotval=0x42461c
+  fault: cause=15 devid=0x18 iotval=0x424620
+  fault: cause=15 devid=0x18 iotval=0x424624
+  fault: cause=15 devid=0x18 iotval=0x424628
+  fault: cause=15 devid=0x18 iotval=0x42462c
+  fault: cause=15 devid=0x18 iotval=0x424630
+  fault: cause=15 devid=0x18 iotval=0x424634
+  fault: cause=15 devid=0x18 iotval=0x424638
+  fault: cause=15 devid=0x18 iotval=0x42463c
+  16 fault record(s), 16 mismatched
+  fault: cause=15 devid=0x18 iotval=0x425000
+  fault: cause=15 devid=0x18 iotval=0x425004
+  fault: cause=15 devid=0x18 iotval=0x425008
+  fault: cause=15 devid=0x18 iotval=0x42500c
+  fault: cause=15 devid=0x18 iotval=0x425010
+  fault: cause=15 devid=0x18 iotval=0x425014
+  fault: cause=15 devid=0x18 iotval=0x425018
+  fault: cause=15 devid=0x18 iotval=0x42501c
+  fault: cause=15 devid=0x18 iotval=0x425020
+  fault: cause=15 devid=0x18 iotval=0x425024
+  fault: cause=15 devid=0x18 iotval=0x425028
+  fault: cause=15 devid=0x18 iotval=0x42502c
+  fault: cause=15 devid=0x18 iotval=0x425030
+  fault: cause=15 devid=0x18 iotval=0x425034
+  fault: cause=15 devid=0x18 iotval=0x425038
+  fault: cause=15 devid=0x18 iotval=0x42503c
+  16 fault record(s), 16 mismatched
+  fault: cause=15 devid=0x18 iotval=0x430000
+  fault: cause=15 devid=0x18 iotval=0x430004
+  fault: cause=15 devid=0x18 iotval=0x430008
+  fault: cause=15 devid=0x18 iotval=0x43000c
+  fault: cause=15 devid=0x18 iotval=0x430010
+  fault: cause=15 devid=0x18 iotval=0x430014
+  fault: cause=15 devid=0x18 iotval=0x430018
+  fault: cause=15 devid=0x18 iotval=0x43001c
+  fault: cause=15 devid=0x18 iotval=0x430020
+  fault: cause=15 devid=0x18 iotval=0x430024
+  fault: cause=15 devid=0x18 iotval=0x430028
+  fault: cause=15 devid=0x18 iotval=0x43002c
+  fault: cause=15 devid=0x18 iotval=0x430030
+  fault: cause=15 devid=0x18 iotval=0x430034
+  fault: cause=15 devid=0x18 iotval=0x430038
+  fault: cause=15 devid=0x18 iotval=0x43003c
+  16 fault record(s), 16 mismatched
+FAIL: the driver's device cannot write its context, the command queue or its page table
+  fault: cause=13 devid=0x18 iotval=0x42b000
+  fault: cause=13 devid=0x18 iotval=0x42b004
+  fault: cause=13 devid=0x18 iotval=0x42b008
+  fault: cause=13 devid=0x18 iotval=0x42b00c
+  fault: cause=13 devid=0x18 iotval=0x42b010
+  fault: cause=13 devid=0x18 iotval=0x42b014
+  fault: cause=13 devid=0x18 iotval=0x42b018
+  fault: cause=13 devid=0x18 iotval=0x42b01c
+  fault: cause=13 devid=0x18 iotval=0x42b020
+  fault: cause=13 devid=0x18 iotval=0x42b024
+  fault: cause=13 devid=0x18 iotval=0x42b028
+  fault: cause=13 devid=0x18 iotval=0x42b02c
+  fault: cause=13 devid=0x18 iotval=0x42b030
+  fault: cause=13 devid=0x18 iotval=0x42b034
+  fault: cause=13 devid=0x18 iotval=0x42b038
+  fault: cause=13 devid=0x18 iotval=0x42b03c
+  16 fault record(s), 16 mismatched
+FAIL: the driver's device cannot read the owner's memory
+  fault: cause=15 devid=0x18 iotval=0x100000
+  16 fault record(s), 0 mismatched
+PASS: after the owner revokes the grant, the driver's device is refused
+IOMMU gate: 23/31 checks passed
+IOMMU_GATE: PASS
+QEMU: Terminated
+

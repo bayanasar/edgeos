@@ -1,0 +1,13 @@
+[package]
+name = "qemu-capture"
+version = "0.1.0"
+description = "Run a QEMU test, keep everything it prints, and decide its verdict from the output"
+edition = "2024"
+license = "BSD-3-Clause"
+rust-version = "1.88"
+publish = false
+
+# A workspace of its own: the seL4 scripts build it with nothing else.
+[workspace]
+
+[dependencies]
