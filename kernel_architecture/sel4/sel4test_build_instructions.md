@@ -6,8 +6,8 @@ Status: QEMU RV64 baseline tested; hardware profiles build-only.
 seL4 container, and runs the upstream suite in QEMU. It does not implement a
 new kernel.
 
-Requirements: Bash, Git, Docker, and the upstream `repo` launcher. Python and
-pexpect run inside the container. Run from this directory:
+Requirements: Bash, Git, Docker, the upstream `repo` launcher, and for the
+test step Cargo (Rust 1.88 or later). Run from this directory:
 
 ```sh
 bash sel4test.sh prepare /tmp/sel4-work
@@ -24,9 +24,11 @@ changing the pinned manifest. `REPO_TOOL` can name a repo launcher outside PATH.
 The tested QEMU configuration is RV64, 1 hart, 3072MiB RAM, simulation mode,
 non-MCS, debug build, with no test-name filter. The initial run passed 116 tests
 and disabled 51 according to configuration. Disabled tests are not passes.
-`qemu_capture.py` requires both a nonempty passing suite summary and the upstream
-success marker; failure, premature exit and timeout return nonzero. It saves
-the full output under `logs/` and stops QEMU after the verdict.
+The test runs QEMU through [`qemu-capture`](qemu-capture/README.md), which
+requires both a nonempty passing suite summary and the upstream success
+marker; failure, premature exit and timeout fail the test. It saves the full
+output under `logs/`, stops QEMU after the verdict, and exits 0 on pass, 1 on
+failure and 2 when the test could not be run.
 
 QEMU 10.0.11 also accepts `-machine virt,iommu-sys=on -device riscv-iommu-pci`;
 the image still boots with those options. That is only a boot-compatibility

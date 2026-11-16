@@ -28,7 +28,7 @@ line. Early exit, failure and timeout return nonzero. Overrides:
 `DOCKER_WORKSPACE` and `BUILD_JOBS` as for `sel4test.sh`, and `TEST_TIMEOUT`,
 default 120 seconds.
 
-QEMU configuration (`capture.py`): `virt` without AIA, `rv64`, 1 hart,
+QEMU configuration (`iommu_gate.sh`): `virt` without AIA, `rv64`, 1 hart,
 3072MiB, `riscv-iommu-pci` at 00:01.0, and `edu,dma_mask=0xffffffffff` at
 00:02.0 and 00:03.0. The wide DMA mask lets a device emit full physical
 addresses, as a hostile driver would. The deadline checks read the time from
