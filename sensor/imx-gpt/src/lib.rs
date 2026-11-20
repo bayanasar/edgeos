@@ -151,8 +151,18 @@ impl<R: Regs> ImxGpt<R> {
     /// interval. Counted in, it would measure the rate low by that share of
     /// `over`: 0.1 % for a read that takes 1 us, over 1 ms.
     ///
+    /// That takes each count to be sampled midway between its clock readings.
+    /// A read that follows register writes is not: on the i.MX 8M Plus it
+    /// waits about 1.4 us for them and returns a count sampled near the end
+    /// of the wait, up to 1 us after the midpoint. [`start`] writes registers
+    /// just before this runs, so one count is read and dropped first;
+    /// counted, it measured the rate 0.06 % to 0.17 % low over 1 ms.
+    ///
     /// [`ticks_for`]: ImxGpt::ticks_for
+    /// [`start`]: ImxGpt::start
     pub fn calibrate(&mut self, clock: &impl Clock, over: Duration) -> Option<u64> {
+        // Waits out any register writes before the timed reads.
+        self.count();
         let before0 = clock.now();
         let c0 = self.count();
         let after0 = clock.now();

@@ -55,6 +55,11 @@ struct Model {
     /// Time each register write takes, after it lands: the counter moves on,
     /// and a compare can match, between one write and the next.
     write_time: Rc<Cell<Duration>>,
+    /// How long the first read after a register write waits for the write,
+    /// before it samples: the count it returns is that much late.
+    write_stall: Duration,
+    /// Whether a register write has happened since the last read.
+    stall_pending: bool,
     /// What IR was last written as, readable after the model has moved.
     ir_out: Rc<Cell<u32>>,
     writes: Vec<(usize, u32)>,
@@ -74,6 +79,8 @@ impl Model {
             gated: false,
             skid: Rc::new(Cell::new(Duration::ZERO)),
             write_time: Rc::new(Cell::new(Duration::ZERO)),
+            write_stall: Duration::ZERO,
+            stall_pending: false,
             ir_out: Rc::new(Cell::new(0)),
             writes: Vec::new(),
         }
@@ -120,6 +127,9 @@ impl Model {
 
 impl Regs for Model {
     fn read(&mut self, offset: usize) -> u32 {
+        if std::mem::take(&mut self.stall_pending) {
+            self.clock.advance(self.write_stall);
+        }
         self.check();
         match offset {
             CR => self.cr,
@@ -140,6 +150,7 @@ impl Regs for Model {
 
     fn write(&mut self, offset: usize, value: u32) {
         self.check();
+        self.stall_pending = true;
         self.writes.push((offset, value));
         match offset {
             CR => {
@@ -438,4 +449,20 @@ fn the_time_a_counter_read_takes_does_not_skew_the_rate() {
     let hz = gpt.calibrate(&*clock, Duration::from_millis(1)).unwrap();
     // 24 MHz / 8, within a tick of the 3000 counted.
     assert!((2_999_000..=3_001_000).contains(&hz), "{hz} Hz");
+}
+
+#[test]
+fn a_read_held_up_by_the_writes_before_it_does_not_skew_the_rate() {
+    // The first read after register writes waits for them and samples the
+    // counter at the end of the wait: on the board about 1.4 us, here 10 us.
+    // start() writes just before calibrate reads; a first count read then
+    // would sit 4.5 us after the midpoint of its clock readings and measure
+    // the rate about 280 ppm low over 16 ms.
+    let clock = Rc::new(StepClock::default());
+    let mut model = Model::new(clock.clone());
+    model.write_stall = Duration::from_micros(10);
+    let mut gpt = ImxGpt::start(model);
+    let hz = gpt.calibrate(&*clock, Duration::from_millis(16)).unwrap();
+    // 24 MHz / 8, within a tick, 62.5 Hz over 16 ms.
+    assert!(hz.abs_diff(3_000_000) <= 62, "{hz} Hz");
 }

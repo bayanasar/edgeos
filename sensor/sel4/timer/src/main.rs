@@ -25,8 +25,11 @@ use sel4_microkit::{
 use sensor_core::bus::{Clock, Instant};
 use sensor_imx_gpt::{Arm, CNT, Compare, ImxGpt, Regs};
 
-/// How long the timer's rate is measured for at start: 1 ms, which spins.
-const MEASURE: Duration = Duration::from_millis(1);
+/// How long the timer's rate is measured for at start: 16 ms, which spins.
+/// A counter tick is then about 21 ppm of the rate, 1 us over a 50 ms
+/// sleep, well below the time a signal takes to reach a client. Over 1 ms a
+/// tick was 333 ppm, 17 us over 50 ms, enough to signal a long sleep early.
+const MEASURE: Duration = Duration::from_millis(16);
 
 /// Each client's channel and the compare that serves it.
 const CLIENTS: [(Channel, Compare); 2] = [

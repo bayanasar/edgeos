@@ -4,7 +4,7 @@ The sensor stack on seL4: a timer, an I2C controller driver, the BMP280
 driver and a consumer, each in a Microkit protection domain of its own, for
 the Advantech RSB-3720 (NXP i.MX 8M Plus).
 
-Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's conversions; samples a BMP280 on the board, and passes in QEMU's imx8mp-evk (`qemu.sh`) · Updated: 2026-11-08
+Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's conversions; samples a BMP280 on the board, and passes in QEMU's imx8mp-evk (`qemu.sh`) · Updated: 2026-11-20
 
 ## Four domains
 
@@ -20,8 +20,10 @@ Status: interrupt-driven, with a timer domain for deadlines and for the BMP280's
   signal at a deadline on the shared counter clock; the domain arms that
   compare and signals that client when it matches. It never blocks in a
   call, so it can serve both. It measures the timer's rate against the
-  counter at start, spinning for 1 ms, with each counter read timed from
-  both sides so the read's own time does not skew the rate.
+  counter at start, spinning for 16 ms, with each counter read timed from
+  both sides so the read's own time does not skew the rate. A count read
+  straight after the timer's register writes comes back late, so one is
+  read and dropped before the timed reads.
 - `i2c_imx` runs `sensor-imx-i2c` on the mapped page, with an
   interrupt-driven waiter. It cannot reach pin multiplexing, clocks or any
   other device. While a byte is on the bus it blocks until the controller
@@ -148,6 +150,29 @@ u-boot=> mw.l 0x3038b580 0x10000000; mw.l 0x30384100 3
 
 I2C4 reaches header UIO2: pin 16 SDA, 18 SCL, 19 3.3 V, 20 GND (RSB-3720
 user manual, ed. 1, section 2.4.2.20).
+
+## Result on the board, rate measured over 16 ms (2026-11-20)
+
+This change's image (SHA-256 `7103c2bb...`) ran twice with the BMP280 on
+the bus. The timer domain measures GPT1 at 3000000 Hz in both, and each
+run returns 5 samples and ends with
+`BMP280_SLEEPS: timer=6 early=0 spun=0` and
+`I2C_WAITS: transfers=20 irq=121 expired=0 early=0 polled=0`.
+
+Before it, the first count read after `start` came back late: the clock
+readings around it were 1.75 to 1.9 us apart instead of 0.375 us, the
+count was sampled 0.65 to 1 us after their midpoint, and the rate measured
+0.06 % to 0.17 % low over 1 ms. With the counter running and no register
+written just before, the rate measured exactly 3000000 Hz over 1, 4 and
+16 ms: GPT1 counts 3 MHz, 3/8 of the generic counter's 8 MHz, as the clock
+tree makes it.
+
+A test build of this change that adds one 50 ms sleep through the timer to
+the BMP280 domain's first request ran three times (`5186fea2...`). GPT1
+measured 2999937, 3000000 and 3000000 Hz, within a tick (62.5 Hz over
+16 ms) of 3 MHz, and each time the sleep was signalled 8.0 to 9.5 us after
+its end, never early. On the rate measured over 1 ms before this change,
+the same sleep was signalled 23 to 38.5 us early.
 
 ## Result on the board with a BMP280 (2026-11-08)
 
