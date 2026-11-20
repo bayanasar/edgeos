@@ -159,20 +159,23 @@ run returns 5 samples and ends with
 `BMP280_SLEEPS: timer=6 early=0 spun=0` and
 `I2C_WAITS: transfers=20 irq=121 expired=0 early=0 polled=0`.
 
-Before it, the first count read after `start` came back late: the clock
-readings around it were 1.75 to 1.9 us apart instead of 0.375 us, the
-count was sampled 0.65 to 1 us after their midpoint, and the rate measured
-0.06 % to 0.17 % low over 1 ms. With the counter running and no register
-written just before, the rate measured exactly 3000000 Hz over 1, 4 and
-16 ms: GPT1 counts 3 MHz, 3/8 of the generic counter's 8 MHz, as the clock
-tree makes it.
+Before it, the first count read after `start` came back late. In the three
+runs that recorded the clock readings around it, they were 1.75 to 1.9 us
+apart instead of 0.375 us, the count was sampled 0.65 to 1 us after their
+midpoint, and the rate measured 0.065 % to 0.096 % low over 1 ms. Three
+runs of an image that did not record those readings measured 0.065 % to
+0.17 % low with the same calibration code. 0.17 % over 1 ms needs an
+offset of 1.7 us, longer than any recorded, so its cause is not known.
+With the counter running and no register written just before, the rate
+measured exactly 3000000 Hz over 1, 4 and 16 ms: GPT1 counts 3 MHz, 3/8 of
+the generic counter's 8 MHz, as the clock tree makes it.
 
 A test build of this change that adds one 50 ms sleep through the timer to
 the BMP280 domain's first request ran three times (`5186fea2...`). GPT1
-measured 2999937, 3000000 and 3000000 Hz, within a tick (62.5 Hz over
-16 ms) of 3 MHz, and each time the sleep was signalled 8.0 to 9.5 us after
-its end, never early. On the rate measured over 1 ms before this change,
-the same sleep was signalled 23 to 38.5 us early.
+measured 2999937, 3000000 and 3000000 Hz, within 63 Hz of 3 MHz, about a
+tick (62.5 Hz over 16 ms), and each time the sleep was signalled 8.0 to
+9.5 us after its end, never early. On the rate measured over 1 ms before
+this change, the same sleep was signalled 23 to 38.5 us early.
 
 ## Result on the board with a BMP280 (2026-11-08)
 

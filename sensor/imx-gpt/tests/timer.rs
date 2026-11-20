@@ -456,8 +456,8 @@ fn a_read_held_up_by_the_writes_before_it_does_not_skew_the_rate() {
     // The first read after register writes waits for them and samples the
     // counter at the end of the wait: on the board about 1.4 us, here 10 us.
     // start() writes just before calibrate reads; a first count read then
-    // would sit 4.5 us after the midpoint of its clock readings and measure
-    // the rate about 280 ppm low over 16 ms.
+    // would sit 5 us, half the wait, after the midpoint of its clock readings
+    // and measure the rate about 313 ppm low over 16 ms (2999062 Hz).
     let clock = Rc::new(StepClock::default());
     let mut model = Model::new(clock.clone());
     model.write_stall = Duration::from_micros(10);
